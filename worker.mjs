@@ -99,7 +99,7 @@ async function main() {
   }
 
   // Tool handlers
-  function handleToolCall(name, input) {
+  async function handleToolCall(name, input) {
     const workDir = path.join(jobDir, "work");
     fs.mkdirSync(workDir, { recursive: true });
 
