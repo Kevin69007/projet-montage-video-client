@@ -18,19 +18,27 @@ export async function uploadFiles(
 
     xhr.addEventListener("load", () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(JSON.parse(xhr.responseText));
+        try {
+          resolve(JSON.parse(xhr.responseText));
+        } catch {
+          reject(new Error("Reponse invalide du serveur"));
+        }
+      } else if (xhr.status === 499 || xhr.status === 0) {
+        reject(new Error("Upload timeout — le fichier est trop volumineux ou la connexion trop lente. Essaie avec un fichier plus petit."));
+      } else if (!xhr.responseText) {
+        reject(new Error(`Upload echoue (erreur ${xhr.status}) — le serveur n'a pas repondu`));
       } else {
         try {
           const error = JSON.parse(xhr.responseText);
-          reject(new Error(error.error || "Upload failed"));
+          reject(new Error(error.error || `Upload echoue (${xhr.status})`));
         } catch {
-          reject(new Error(`Upload failed (${xhr.status})`));
+          reject(new Error(`Upload echoue (${xhr.status})`));
         }
       }
     });
 
-    xhr.addEventListener("error", () => reject(new Error("Upload failed — network error")));
-    xhr.addEventListener("abort", () => reject(new Error("Upload cancelled")));
+    xhr.addEventListener("error", () => reject(new Error("Upload echoue — erreur reseau. Verifie ta connexion.")));
+    xhr.addEventListener("abort", () => reject(new Error("Upload annule")));
 
     xhr.open("POST", `${API_BASE}/api/upload`);
     xhr.send(formData);
