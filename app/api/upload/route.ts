@@ -8,21 +8,6 @@ export const maxDuration = 600;
 
 export async function POST(request: NextRequest) {
   try {
-    const contentType = request.headers.get("content-type") || "";
-
-    if (!contentType.includes("multipart/form-data")) {
-      return NextResponse.json(
-        { error: "Expected multipart/form-data" },
-        { status: 400 }
-      );
-    }
-
-    const jobId = uuidv4();
-    const jobDir = path.join(process.cwd(), "jobs", jobId);
-    const inputDir = path.join(jobDir, "input");
-    fs.mkdirSync(inputDir, { recursive: true });
-
-    // Parse multipart form data
     const formData = await request.formData();
     const files = formData.getAll("files") as File[];
 
@@ -33,27 +18,19 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const jobId = uuidv4();
+    const jobDir = path.join(process.cwd(), "jobs", jobId);
+    const inputDir = path.join(jobDir, "input");
+    fs.mkdirSync(inputDir, { recursive: true });
+
     const fileNames: string[] = [];
 
     for (const file of files) {
       const fileName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
       const filePath = path.join(inputDir, fileName);
 
-      // Stream file to disk in chunks instead of loading entirely in memory
-      const fileStream = fs.createWriteStream(filePath);
-      const reader = file.stream().getReader();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        fileStream.write(Buffer.from(value));
-      }
-
-      await new Promise<void>((resolve, reject) => {
-        fileStream.end(() => resolve());
-        fileStream.on("error", reject);
-      });
-
+      const buffer = Buffer.from(await file.arrayBuffer());
+      fs.writeFileSync(filePath, buffer);
       fileNames.push(fileName);
     }
 
