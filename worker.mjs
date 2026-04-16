@@ -123,7 +123,6 @@ async function main() {
 
         // Call OpenAI Whisper API
         console.log(`[WORKER ${jobId}] Calling OpenAI Whisper API...`);
-        const { FormData: NodeFormData } = await import("node:buffer");
         const audioBuffer = fs.readFileSync(audioPath);
         const audioBlob = new Blob([audioBuffer], { type: "audio/mpeg" });
 
