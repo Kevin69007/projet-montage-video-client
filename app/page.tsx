@@ -14,9 +14,18 @@ export default function Home() {
   const [style, setStyle] = useState("hormozi");
   const [accentColor, setAccentColor] = useState("");
   const [loading, setLoading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadPhase, setUploadPhase] = useState<"idle" | "uploading" | "starting">("idle");
   const [error, setError] = useState("");
 
   const canSubmit = files.length > 0 && prompt.trim().length > 0 && !loading;
+
+  const formatTotalSize = (files: File[]) => {
+    const total = files.reduce((sum, f) => sum + f.size, 0);
+    if (total < 1024 * 1024) return `${(total / 1024).toFixed(0)} KB`;
+    if (total < 1024 * 1024 * 1024) return `${(total / 1024 / 1024).toFixed(1)} MB`;
+    return `${(total / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  };
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
@@ -24,7 +33,14 @@ export default function Home() {
     setError("");
 
     try {
-      const { jobId } = await uploadFiles(files);
+      setUploadPhase("uploading");
+      setUploadProgress(0);
+
+      const { jobId } = await uploadFiles(files, (progress) => {
+        setUploadProgress(progress);
+      });
+
+      setUploadPhase("starting");
       await startProcessing({
         jobId,
         prompt,
@@ -36,6 +52,7 @@ export default function Home() {
       const error = err as Error;
       setError(error.message || "Une erreur est survenue");
       setLoading(false);
+      setUploadPhase("idle");
     }
   };
 
@@ -96,14 +113,44 @@ export default function Home() {
         )}
 
         {/* Submit */}
-        <div className="pt-4">
+        <div className="pt-4 space-y-3">
           <button
             onClick={handleSubmit}
             disabled={!canSubmit}
             className="btn-primary w-full text-lg py-4"
           >
-            {loading ? "Upload en cours..." : "Lancer le montage"}
+            {uploadPhase === "uploading"
+              ? `Upload ${uploadProgress}%`
+              : uploadPhase === "starting"
+                ? "Demarrage du pipeline..."
+                : "Lancer le montage"}
           </button>
+
+          {loading && (
+            <div>
+              <div className="w-full h-1.5 bg-bg-tertiary overflow-hidden">
+                <div
+                  className="h-full transition-all duration-300 ease-out"
+                  style={{
+                    width: uploadPhase === "starting" ? "100%" : `${uploadProgress}%`,
+                    background: "linear-gradient(90deg, #6C2BD9, #C67651)",
+                  }}
+                />
+              </div>
+              <div className="flex justify-between mt-1.5">
+                <span className="mono-label">
+                  {uploadPhase === "uploading"
+                    ? `${formatTotalSize(files)} — ${uploadProgress}%`
+                    : "Connexion au pipeline..."}
+                </span>
+                {uploadPhase === "uploading" && uploadProgress < 100 && (
+                  <span className="mono-label">
+                    {files.length} fichier{files.length > 1 ? "s" : ""}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </main>

@@ -1,22 +1,40 @@
 const API_BASE = "";
 
 export async function uploadFiles(
-  files: File[]
+  files: File[],
+  onProgress?: (progress: number) => void
 ): Promise<{ jobId: string; files: string[] }> {
   const formData = new FormData();
   files.forEach((file) => formData.append("files", file));
 
-  const res = await fetch(`${API_BASE}/api/upload`, {
-    method: "POST",
-    body: formData,
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+
+    xhr.upload.addEventListener("progress", (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    });
+
+    xhr.addEventListener("load", () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(JSON.parse(xhr.responseText));
+      } else {
+        try {
+          const error = JSON.parse(xhr.responseText);
+          reject(new Error(error.error || "Upload failed"));
+        } catch {
+          reject(new Error(`Upload failed (${xhr.status})`));
+        }
+      }
+    });
+
+    xhr.addEventListener("error", () => reject(new Error("Upload failed — network error")));
+    xhr.addEventListener("abort", () => reject(new Error("Upload cancelled")));
+
+    xhr.open("POST", `${API_BASE}/api/upload`);
+    xhr.send(formData);
   });
-
-  if (!res.ok) {
-    const error = await res.json();
-    throw new Error(error.error || "Upload failed");
-  }
-
-  return res.json();
 }
 
 export async function startProcessing(params: {
