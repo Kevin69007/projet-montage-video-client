@@ -9,7 +9,7 @@ function getClient() {
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY is not set");
   }
-  return new Anthropic({ apiKey });
+  return new Anthropic({ apiKey, timeout: 120000 });
 }
 
 const SYSTEM_PROMPT = `Tu es un assistant montage video professionnel. Tu recois des videos uploadees par l'utilisateur et un prompt decrivant le montage souhaite. Tu utilises les outils disponibles pour produire les videos finales.
