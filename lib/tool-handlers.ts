@@ -6,12 +6,13 @@ const PIPELINE_DIR = path.join(process.cwd(), "pipeline");
 const SCRIPTS_DIR = path.join(PIPELINE_DIR, "scripts");
 const FONTS_DIR = path.join(PIPELINE_DIR, "fonts");
 
-function exec(cmd: string, timeoutMs = 600000): string {
+function exec(cmd: string, timeoutMs = 1800000): string {
   try {
     return execSync(cmd, {
       encoding: "utf-8",
       timeout: timeoutMs,
       maxBuffer: 50 * 1024 * 1024,
+      stdio: ["pipe", "pipe", "pipe"],
       env: {
         ...process.env,
         FFMPEG_PATH: process.env.FFMPEG_PATH || "ffmpeg",
@@ -19,9 +20,13 @@ function exec(cmd: string, timeoutMs = 600000): string {
       },
     }).trim();
   } catch (err: unknown) {
-    const error = err as { stderr?: string; message?: string };
+    const error = err as { status?: number; stdout?: string; stderr?: string; message?: string };
+    // If the command produced stdout and exited with code 0-like, it might still be OK
+    // But execSync only throws on non-zero exit, so this is a real failure
+    const stderr = (error.stderr || "").trim();
+    const lastLines = stderr.split("\n").filter(l => !l.includes("MiB/s") && !l.includes("iB/s") && l.trim()).slice(-5).join("\n");
     throw new Error(
-      `Command failed: ${error.stderr || error.message || "Unknown error"}`
+      `${lastLines || error.message || "Unknown error"}`
     );
   }
 }
@@ -79,7 +84,7 @@ function handleTranscribe(
 
   exec(
     `python3 "${SCRIPTS_DIR}/transcribe.py" --video "${videoPath}" --output "${outputPath}" --language ${language}`,
-    600000
+    1800000
   );
 
   if (!fs.existsSync(outputPath)) {
