@@ -74,43 +74,71 @@ export async function handleToolCall(
   }
 }
 
-function handleTranscribe(
+async function handleTranscribe(
   input: Record<string, unknown>,
   workDir: string
-): ToolResult {
+): Promise<ToolResult> {
   const videoPath = input.video_path as string;
   const language = (input.language as string) || "fr";
   const outputPath = path.join(workDir, `transcription_${Date.now()}.json`);
 
-  try {
-    exec(
-      `python3 "${SCRIPTS_DIR}/transcribe.py" --video "${videoPath}" --output "${outputPath}" --language ${language}`,
-      1800000
-    );
-  } catch (err: unknown) {
-    // Whisper outputs FP16 warning to stderr — check if output file was created despite the "error"
-    if (!fs.existsSync(outputPath)) {
-      throw err;
-    }
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey) {
+    return { success: false, result: "", error: "OPENAI_API_KEY is not set" };
   }
 
-  if (!fs.existsSync(outputPath)) {
+  // Extract audio (OpenAI API has 25MB limit)
+  const audioPath = path.join(workDir, `audio_${Date.now()}.mp3`);
+  exec(
+    `ffmpeg -y -i "${videoPath}" -vn -ac 1 -ar 16000 -b:a 64k -f mp3 "${audioPath}"`,
+    300000
+  );
+
+  // Call OpenAI Whisper API
+  const audioBuffer = fs.readFileSync(audioPath);
+  const audioBlob = new Blob([audioBuffer], { type: "audio/mpeg" });
+
+  const formData = new FormData();
+  formData.append("file", audioBlob, "audio.mp3");
+  formData.append("model", "whisper-1");
+  formData.append("language", language);
+  formData.append("response_format", "verbose_json");
+  formData.append("timestamp_granularities[]", "word");
+
+  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${openaiKey}` },
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
     return {
       success: false,
       result: "",
-      error: "Transcription file was not created",
+      error: `OpenAI API error ${res.status}: ${errText.slice(0, 300)}`,
     };
   }
 
-  const transcription = fs.readFileSync(outputPath, "utf-8");
-  const words = JSON.parse(transcription);
-  const wordCount = words.filter(
-    (w: { type?: string }) => !w.type || w.type === "word"
-  ).length;
+  const data = await res.json();
+
+  // Transform to [{word, start, end}] format
+  const words = ((data as { words?: { word: string; start: number; end: number }[] }).words || []).map(
+    (w: { word: string; start: number; end: number }) => ({
+      word: w.word.trim(),
+      start: w.start,
+      end: w.end,
+    })
+  );
+
+  fs.writeFileSync(outputPath, JSON.stringify(words, null, 2));
+
+  // Clean up audio file
+  try { fs.unlinkSync(audioPath); } catch (_) { /* ignore */ }
 
   return {
     success: true,
-    result: `Transcription saved to ${outputPath}. Found ${wordCount} words. First 5 words: ${JSON.stringify(words.filter((w: { type?: string }) => !w.type || w.type === "word").slice(0, 5))}`,
+    result: `Transcription saved to ${outputPath}. Found ${words.length} words. First 5: ${JSON.stringify(words.slice(0, 5))}`,
   };
 }
 

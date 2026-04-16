@@ -110,21 +110,57 @@ async function main() {
         const videoPath = input.video_path;
         const language = input.language || "fr";
         const outputPath = path.join(workDir, `transcription_${Date.now()}.json`);
-        try {
-          exec(`python3 "${SCRIPTS_DIR}/transcribe.py" --video "${videoPath}" --output "${outputPath}" --language ${language}`, 1800000);
-        } catch (transcribeErr) {
-          // Whisper outputs FP16 warning to stderr which causes exec to throw
-          // Check if the output file was created despite the "error"
-          console.log(`[WORKER ${jobId}] Transcribe exec threw: ${transcribeErr.message.slice(0, 100)}`);
-          if (!fs.existsSync(outputPath)) {
-            return { success: false, result: "", error: transcribeErr.message };
-          }
-          console.log(`[WORKER ${jobId}] Transcription file exists despite error — continuing`);
+
+        const openaiKey = process.env.OPENAI_API_KEY;
+        if (!openaiKey) {
+          return { success: false, result: "", error: "OPENAI_API_KEY is not set" };
         }
-        if (!fs.existsSync(outputPath)) return { success: false, result: "", error: "Transcription file was not created" };
-        const words = JSON.parse(fs.readFileSync(outputPath, "utf-8"));
-        const wordCount = words.filter(w => !w.type || w.type === "word").length;
-        return { success: true, result: `Transcription saved to ${outputPath}. Found ${wordCount} words. First 5: ${JSON.stringify(words.filter(w => !w.type || w.type === "word").slice(0, 5))}` };
+
+        // Extract audio (OpenAI API has 25MB limit — audio-only is much smaller)
+        const audioPath = path.join(workDir, `audio_${Date.now()}.mp3`);
+        console.log(`[WORKER ${jobId}] Extracting audio...`);
+        exec(`ffmpeg -y -i "${videoPath}" -vn -ac 1 -ar 16000 -b:a 64k -f mp3 "${audioPath}"`, 300000);
+
+        // Call OpenAI Whisper API
+        console.log(`[WORKER ${jobId}] Calling OpenAI Whisper API...`);
+        const { FormData: NodeFormData } = await import("node:buffer");
+        const audioBuffer = fs.readFileSync(audioPath);
+        const audioBlob = new Blob([audioBuffer], { type: "audio/mpeg" });
+
+        const formData = new FormData();
+        formData.append("file", audioBlob, "audio.mp3");
+        formData.append("model", "whisper-1");
+        formData.append("language", language);
+        formData.append("response_format", "verbose_json");
+        formData.append("timestamp_granularities[]", "word");
+
+        const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${openaiKey}` },
+          body: formData,
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          return { success: false, result: "", error: `OpenAI API error ${res.status}: ${errText.slice(0, 300)}` };
+        }
+
+        const data = await res.json();
+        console.log(`[WORKER ${jobId}] Whisper API response: ${data.words?.length || 0} words`);
+
+        // Transform to [{word, start, end}] format
+        const words = (data.words || []).map(w => ({
+          word: w.word.trim(),
+          start: w.start,
+          end: w.end,
+        }));
+
+        fs.writeFileSync(outputPath, JSON.stringify(words, null, 2));
+
+        // Clean up audio file
+        try { fs.unlinkSync(audioPath); } catch (_) {}
+
+        return { success: true, result: `Transcription saved to ${outputPath}. Found ${words.length} words. First 5: ${JSON.stringify(words.slice(0, 5))}` };
       }
       case "cut_video": {
         const segments = input.segments;
