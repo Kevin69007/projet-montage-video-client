@@ -1,0 +1,90 @@
+"use client";
+
+import { useEffect, useState, useCallback } from "react";
+import { useParams, useRouter } from "next/navigation";
+import JobProgress from "@/components/JobProgress";
+import VideoResults from "@/components/VideoResults";
+import { getJobStatus, type JobStatus } from "@/lib/api";
+
+export default function JobPage() {
+  const params = useParams();
+  const router = useRouter();
+  const jobId = params.id as string;
+
+  const [status, setStatus] = useState<JobStatus | null>(null);
+  const [error, setError] = useState("");
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const data = await getJobStatus(jobId);
+      setStatus(data);
+    } catch {
+      setError("Impossible de recuperer le statut");
+    }
+  }, [jobId]);
+
+  useEffect(() => {
+    fetchStatus();
+    const interval = setInterval(() => {
+      fetchStatus();
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [fetchStatus]);
+
+  // Stop polling when done or error
+  useEffect(() => {
+    if (status?.status === "done" || status?.status === "error") {
+      // Final fetch to get latest data
+      fetchStatus();
+    }
+  }, [status?.status, fetchStatus]);
+
+  const isDone = status?.status === "done";
+  const isError = status?.status === "error";
+
+  return (
+    <main className="flex-1 flex flex-col">
+      {/* Header */}
+      <header className="border-b border-glass-border">
+        <div className="max-w-4xl mx-auto px-6 py-6 flex items-center justify-between">
+          <div>
+            <h1 className="heading-xl text-2xl sm:text-3xl">
+              {isDone ? "Resultats" : isError ? "Erreur" : "Processing"}
+            </h1>
+            <p className="text-xs text-text-muted mt-1 font-mono">{jobId}</p>
+          </div>
+          <button onClick={() => router.push("/")} className="btn-ghost text-sm">
+            Nouveau montage
+          </button>
+        </div>
+      </header>
+
+      {/* Content */}
+      <div className="flex-1 max-w-4xl mx-auto w-full px-6 py-8">
+        {error && (
+          <div className="border border-red-500/30 bg-red-500/5 p-4 mb-6">
+            <p className="text-sm text-red-400">{error}</p>
+          </div>
+        )}
+
+        {!status && !error && (
+          <div className="text-center py-20">
+            <div className="inline-block w-8 h-8 border-2 border-purple border-t-transparent animate-spin" />
+            <p className="text-sm text-text-muted mt-4">Chargement...</p>
+          </div>
+        )}
+
+        {status && !isDone && <JobProgress status={status} />}
+
+        {status && isDone && (
+          <VideoResults
+            jobId={jobId}
+            outputs={status.outputs}
+            message={status.message}
+          />
+        )}
+      </div>
+    </main>
+  );
+}

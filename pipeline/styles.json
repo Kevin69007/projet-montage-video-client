@@ -1,0 +1,153 @@
+{
+  "hormozi": {
+    "name": "Hormozi",
+    "description": "Word highlight — business, coaching, podcast",
+    "font": "Montserrat",
+    "weight": 900,
+    "size": 80,
+    "textTransform": "uppercase",
+    "color": "#FFFFFF",
+    "accentColor": "#FFD700",
+    "outline": { "width": 4, "color": "#000000" },
+    "shadow": null,
+    "glow": null,
+    "background": null,
+    "animation": "scale-pop",
+    "position": "center-lower",
+    "wordsPerLine": 5,
+    "accentPresets": ["#FFD700", "#FF6600", "#00FF7F", "#FF3366", "#00D4FF"],
+    "ffmpeg": {
+      "force_style": "FontName=Montserrat,FontSize=80,PrimaryColour=&H00FFFFFF,SecondaryColour=&H0000D7FF,OutlineColour=&H00000000,Outline=4,Bold=-1,Alignment=2,MarginV=120"
+    }
+  },
+  "mrbeast": {
+    "name": "MrBeast",
+    "description": "Bold pop — entertainment, challenges, hype",
+    "font": "Impact",
+    "weight": 700,
+    "size": 100,
+    "textTransform": "uppercase",
+    "color": "#FFFFFF",
+    "accentColor": "#00FF41",
+    "outline": { "width": 6, "color": "#000000" },
+    "shadow": null,
+    "glow": null,
+    "background": null,
+    "animation": "hard-pop",
+    "position": "center",
+    "wordsPerLine": 3,
+    "accentPresets": ["#00FF41", "#FFD700", "#FF0000", "#00D4FF", "#FF00FF"],
+    "ffmpeg": {
+      "force_style": "FontName=Impact,FontSize=100,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=6,Bold=-1,Alignment=5,MarginV=0"
+    }
+  },
+  "karaoke": {
+    "name": "Karaoke",
+    "description": "Progressive fill — educatif, interviews, cuisine",
+    "font": "Poppins",
+    "weight": 700,
+    "size": 65,
+    "textTransform": "none",
+    "color": "#FFFFFF",
+    "accentColor": "#FFE600",
+    "dimColor": "#666666",
+    "outline": { "width": 2, "color": "#000000" },
+    "shadow": null,
+    "glow": { "color": "#FFE600", "radius": 8 },
+    "background": { "color": "rgba(0,0,0,0.4)", "borderRadius": 12, "padding": "8px 16px" },
+    "animation": "color-fill",
+    "position": "bottom",
+    "wordsPerLine": 6,
+    "accentPresets": ["#FFE600", "#FFFFFF", "#00D4FF", "#FF6B9D", "#A7C7E7"],
+    "ffmpeg": {
+      "force_style": "FontName=Poppins,FontSize=65,PrimaryColour=&H00FFFFFF,SecondaryColour=&H00666666,OutlineColour=&H00000000,Outline=2,Bold=-1,Alignment=2,MarginV=80,BorderStyle=4,BackColour=&H66000000"
+    }
+  },
+  "boxed": {
+    "name": "Boxed",
+    "description": "Pill clean — branded, corporate, lifestyle",
+    "font": "Poppins",
+    "weight": 600,
+    "size": 56,
+    "textTransform": "none",
+    "color": "#FFFFFF",
+    "accentColor": "#4A90E2",
+    "outline": null,
+    "shadow": null,
+    "glow": null,
+    "background": { "color": "rgba(0,0,0,0.8)", "borderRadius": 14, "padding": "8px 20px" },
+    "animation": "slide-up",
+    "position": "bottom-safe",
+    "wordsPerLine": 7,
+    "accentPresets": ["#4A90E2", "#F5A623", "#E74C3C", "#2ECC71", "#9B59B6"],
+    "ffmpeg": {
+      "force_style": "FontName=Poppins,FontSize=56,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=0,Bold=-1,Alignment=2,MarginV=100,BorderStyle=4,BackColour=&HCC000000"
+    }
+  },
+  "minimal": {
+    "name": "Minimal",
+    "description": "Lower third — documentaire, podcast, LinkedIn",
+    "font": "Inter",
+    "weight": 600,
+    "size": 48,
+    "textTransform": "none",
+    "color": "#FFFFFF",
+    "accentColor": "#4F46E5",
+    "outline": null,
+    "shadow": { "x": 2, "y": 2, "blur": 4, "color": "rgba(0,0,0,0.5)" },
+    "glow": null,
+    "background": null,
+    "barColor": "#4F46E5",
+    "animation": "draw-in",
+    "position": "lower-third-left",
+    "wordsPerLine": 10,
+    "accentPresets": ["#4F46E5", "#E74C3C", "#F5A623", "#2ECC71", "#FF6B9D"],
+    "ffmpeg": {
+      "force_style": "FontName=Inter,FontSize=48,PrimaryColour=&H00FFFFFF,OutlineColour=&H80000000,Outline=1,Shadow=2,Bold=0,Alignment=1,MarginL=50,MarginV=100"
+    }
+  },
+  "cove": {
+    "name": "Cove",
+    "description": "Dual-font — mot-clé en serif italic accent. Inspiré Captions COVE.",
+    "font": "Instrument Sans",
+    "accentFont": "Playfair Display",
+    "weight": 700,
+    "size": 72,
+    "textTransform": "none",
+    "color": "#FFFFFF",
+    "accentColor": "#E85A4F",
+    "accentItalic": true,
+    "outline": { "width": 3, "color": "#000000" },
+    "shadow": { "x": 2, "y": 2, "blur": 4, "color": "rgba(0,0,0,0.6)" },
+    "glow": null,
+    "background": null,
+    "animation": "italic-pop",
+    "position": "center",
+    "wordsPerLine": 4,
+    "accentPresets": ["#E85A4F", "#D4463B", "#FF6B5A", "#C93C30", "#E8735A"],
+    "ffmpeg": {
+      "force_style": "FontName=Instrument Sans,FontSize=72,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=3,Shadow=2,Bold=-1,Alignment=5,MarginV=0"
+    }
+  },
+  "neon": {
+    "name": "Neon",
+    "description": "Glow effect — gaming, musique, fashion, Gen Z",
+    "font": "system-ui",
+    "weight": 700,
+    "size": 75,
+    "textTransform": "uppercase",
+    "color": "#00FFFF",
+    "accentColor": "#FF00FF",
+    "outline": null,
+    "shadow": null,
+    "glow": { "color": "#00FFFF", "radius": 20 },
+    "background": null,
+    "animation": "glitch",
+    "position": "center-lower",
+    "wordsPerLine": 4,
+    "accentPresets": ["#00FFFF", "#FF00FF", "#39FF14", "#FF6B35", "#A855F7"],
+    "ffmpeg": {
+      "force_style": "FontName=Arial,FontSize=75,PrimaryColour=&H00FFFF00,OutlineColour=&H00FF0000,Outline=3,Shadow=4,Bold=-1,Alignment=2,MarginV=120"
+    }
+  }
+}
