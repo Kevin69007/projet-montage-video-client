@@ -173,14 +173,28 @@ ${prompt}`;
 
     addLog(jobDir, `Iteration ${iterationCount} — appel Claude API`);
 
-    const client = getClient();
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 8192,
-      system: SYSTEM_PROMPT,
-      tools: TOOLS,
-      messages,
-    });
+    let response: Anthropic.Message;
+    try {
+      const client = getClient();
+      response = await client.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 8192,
+        system: SYSTEM_PROMPT,
+        tools: TOOLS,
+        messages,
+      });
+    } catch (apiError: unknown) {
+      const err = apiError as Error;
+      addLog(jobDir, `ERREUR API Claude: ${err.message}`);
+      updateStatus(jobDir, {
+        status: "error",
+        step: "Erreur",
+        message: `Erreur API Claude: ${err.message}`,
+      });
+      return;
+    }
+
+    addLog(jobDir, `Reponse Claude: ${response.content.length} blocs, stop=${response.stop_reason}`);
 
     // Process the response
     const assistantContent = response.content;
@@ -225,14 +239,20 @@ ${prompt}`;
       const toolInput = (toolUse as { input: Record<string, unknown> }).input;
       const toolId = (toolUse as { id: string }).id;
 
-      addLog(jobDir, `Outil: ${toolName}`);
+      addLog(jobDir, `Outil: ${toolName}(${JSON.stringify(toolInput).slice(0, 200)})`);
       updateStatus(jobDir, {
         step: getStepLabel(toolName),
         message: `Execution: ${toolName}...`,
         progress: getProgress(toolName),
       });
 
-      const result = await handleToolCall(toolName, toolInput, jobDir);
+      let result;
+      try {
+        result = await handleToolCall(toolName, toolInput, jobDir);
+      } catch (toolError: unknown) {
+        const err = toolError as Error;
+        result = { success: false, result: "", error: err.message };
+      }
 
       addLog(
         jobDir,
