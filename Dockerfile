@@ -33,7 +33,8 @@ COPY --from=builder /app/package.json ./
 COPY --from=builder /app/next.config.ts ./
 COPY --from=builder /app/public ./public
 
-# Copy pipeline scripts, fonts, and styles
+# Copy worker script and pipeline
+COPY worker.mjs ./worker.mjs
 COPY pipeline/ ./pipeline/
 
 # Create jobs directory

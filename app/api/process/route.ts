@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as fs from "fs";
 import * as path from "path";
-import { runAgent } from "@/lib/agent";
 
 export const runtime = "nodejs";
-export const maxDuration = 600;
 
 export async function POST(request: NextRequest) {
   try {
@@ -25,7 +23,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
-    // Get list of uploaded files
     const fileNames = fs.readdirSync(inputDir);
     if (fileNames.length === 0) {
       return NextResponse.json(
@@ -34,28 +31,37 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Start the agent in the background (fire and forget)
-    runAgent(jobId, prompt, fileNames, style || "hormozi", accentColor).catch(
-      (err) => {
-        console.error(`Agent error for job ${jobId}:`, err);
-        const statusPath = path.join(jobDir, "status.json");
-        const status = fs.existsSync(statusPath)
-          ? JSON.parse(fs.readFileSync(statusPath, "utf-8"))
-          : {};
-        status.status = "error";
-        status.step = "Erreur";
-        status.message = err.message || "Erreur inconnue";
-        status.log = [
-          ...(status.log || []),
-          `[${new Date().toISOString()}] ERREUR: ${err.message}`,
-        ];
-        fs.writeFileSync(statusPath, JSON.stringify(status, null, 2));
-      }
+    // Write job params for the worker
+    const paramsPath = path.join(jobDir, "params.json");
+    fs.writeFileSync(
+      paramsPath,
+      JSON.stringify({
+        prompt,
+        style: style || "hormozi",
+        accentColor: accentColor || "",
+        fileNames,
+      })
     );
+
+    // Spawn worker as a detached child process
+    // Use exec to avoid Turbopack trying to resolve the worker path
+    const { exec: execChild } = await import("child_process");
+    const workerCmd = `node ${path.join(process.cwd(), "worker.mjs")} ${jobId}`;
+    console.log(`[PROCESS] Spawning worker for job ${jobId}`);
+
+    const child = execChild(workerCmd, {
+      env: { ...process.env },
+      maxBuffer: 10 * 1024 * 1024,
+    });
+
+    child.unref();
+
+    console.log(`[PROCESS] Worker spawned for job ${jobId}`);
 
     return NextResponse.json({ ok: true, jobId });
   } catch (err: unknown) {
     const error = err as Error;
+    console.error("[PROCESS] Error:", error);
     return NextResponse.json(
       { error: error.message || "Process failed" },
       { status: 500 }
