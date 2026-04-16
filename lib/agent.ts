@@ -4,7 +4,13 @@ import * as path from "path";
 import { TOOLS } from "./tools";
 import { handleToolCall } from "./tool-handlers";
 
-const client = new Anthropic();
+function getClient() {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new Error("ANTHROPIC_API_KEY is not set");
+  }
+  return new Anthropic({ apiKey });
+}
 
 const SYSTEM_PROMPT = `Tu es un assistant montage video professionnel. Tu recois des videos uploadees par l'utilisateur et un prompt decrivant le montage souhaite. Tu utilises les outils disponibles pour produire les videos finales.
 
@@ -167,6 +173,7 @@ ${prompt}`;
 
     addLog(jobDir, `Iteration ${iterationCount} — appel Claude API`);
 
+    const client = getClient();
     const response = await client.messages.create({
       model: "claude-sonnet-4-20250514",
       max_tokens: 8192,
