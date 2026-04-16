@@ -82,32 +82,30 @@ async function handleTranscribe(
   const language = (input.language as string) || "fr";
   const outputPath = path.join(workDir, `transcription_${Date.now()}.json`);
 
-  const openaiKey = process.env.OPENAI_API_KEY;
-  if (!openaiKey) {
-    return { success: false, result: "", error: "OPENAI_API_KEY is not set" };
+  const elevenLabsKey = process.env.ELEVENLABS_API_KEY;
+  if (!elevenLabsKey) {
+    return { success: false, result: "", error: "ELEVENLABS_API_KEY is not set" };
   }
 
-  // Extract audio (OpenAI API has 25MB limit)
+  // Extract audio for upload
   const audioPath = path.join(workDir, `audio_${Date.now()}.mp3`);
   exec(
     `ffmpeg -y -i "${videoPath}" -vn -ac 1 -ar 16000 -b:a 64k -f mp3 "${audioPath}"`,
     300000
   );
 
-  // Call OpenAI Whisper API
+  // Call ElevenLabs Speech-to-Text API
   const audioBuffer = fs.readFileSync(audioPath);
   const audioBlob = new Blob([audioBuffer], { type: "audio/mpeg" });
 
   const formData = new FormData();
   formData.append("file", audioBlob, "audio.mp3");
-  formData.append("model", "whisper-1");
-  formData.append("language", language);
-  formData.append("response_format", "verbose_json");
-  formData.append("timestamp_granularities[]", "word");
+  formData.append("model_id", "scribe_v1");
+  formData.append("language_code", language === "fr" ? "fra" : language === "en" ? "eng" : language);
 
-  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+  const res = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
     method: "POST",
-    headers: { Authorization: `Bearer ${openaiKey}` },
+    headers: { "xi-api-key": elevenLabsKey },
     body: formData,
   });
 
@@ -116,20 +114,34 @@ async function handleTranscribe(
     return {
       success: false,
       result: "",
-      error: `OpenAI API error ${res.status}: ${errText.slice(0, 300)}`,
+      error: `ElevenLabs API error ${res.status}: ${errText.slice(0, 300)}`,
     };
   }
 
-  const data = await res.json();
+  const data = await res.json() as Record<string, unknown>;
 
-  // Transform to [{word, start, end}] format
-  const words = ((data as { words?: { word: string; start: number; end: number }[] }).words || []).map(
-    (w: { word: string; start: number; end: number }) => ({
-      word: w.word.trim(),
+  // Extract word-level timestamps from ElevenLabs response
+  type WordEntry = { text?: string; word?: string; start: number; end: number; type?: string };
+  let words: { word: string; start: number; end: number }[] = [];
+
+  const dataWords = data.words as WordEntry[] | undefined;
+  const dataAlignment = data.alignment as { words: WordEntry[] } | undefined;
+
+  if (dataWords && Array.isArray(dataWords)) {
+    words = dataWords
+      .filter((w: WordEntry) => w.type === "word" || !w.type)
+      .map((w: WordEntry) => ({
+        word: (w.text || w.word || "").trim(),
+        start: w.start,
+        end: w.end,
+      }));
+  } else if (dataAlignment && dataAlignment.words) {
+    words = dataAlignment.words.map((w: WordEntry) => ({
+      word: (w.text || w.word || "").trim(),
       start: w.start,
       end: w.end,
-    })
-  );
+    }));
+  }
 
   fs.writeFileSync(outputPath, JSON.stringify(words, null, 2));
 

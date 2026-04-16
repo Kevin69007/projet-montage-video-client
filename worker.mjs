@@ -111,48 +111,60 @@ async function main() {
         const language = input.language || "fr";
         const outputPath = path.join(workDir, `transcription_${Date.now()}.json`);
 
-        const openaiKey = process.env.OPENAI_API_KEY;
-        if (!openaiKey) {
-          return { success: false, result: "", error: "OPENAI_API_KEY is not set" };
+        const elevenLabsKey = process.env.ELEVENLABS_API_KEY;
+        if (!elevenLabsKey) {
+          return { success: false, result: "", error: "ELEVENLABS_API_KEY is not set" };
         }
 
-        // Extract audio (OpenAI API has 25MB limit — audio-only is much smaller)
+        // Extract audio for upload
         const audioPath = path.join(workDir, `audio_${Date.now()}.mp3`);
         console.log(`[WORKER ${jobId}] Extracting audio...`);
         exec(`ffmpeg -y -i "${videoPath}" -vn -ac 1 -ar 16000 -b:a 64k -f mp3 "${audioPath}"`, 300000);
 
-        // Call OpenAI Whisper API
-        console.log(`[WORKER ${jobId}] Calling OpenAI Whisper API...`);
+        // Call ElevenLabs Speech-to-Text API
+        console.log(`[WORKER ${jobId}] Calling ElevenLabs STT API...`);
         const audioBuffer = fs.readFileSync(audioPath);
         const audioBlob = new Blob([audioBuffer], { type: "audio/mpeg" });
 
         const formData = new FormData();
         formData.append("file", audioBlob, "audio.mp3");
-        formData.append("model", "whisper-1");
-        formData.append("language", language);
-        formData.append("response_format", "verbose_json");
-        formData.append("timestamp_granularities[]", "word");
+        formData.append("model_id", "scribe_v1");
+        formData.append("language_code", language === "fr" ? "fra" : language === "en" ? "eng" : language);
 
-        const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+        const res = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
           method: "POST",
-          headers: { "Authorization": `Bearer ${openaiKey}` },
+          headers: { "xi-api-key": elevenLabsKey },
           body: formData,
         });
 
         if (!res.ok) {
           const errText = await res.text();
-          return { success: false, result: "", error: `OpenAI API error ${res.status}: ${errText.slice(0, 300)}` };
+          return { success: false, result: "", error: `ElevenLabs API error ${res.status}: ${errText.slice(0, 300)}` };
         }
 
         const data = await res.json();
-        console.log(`[WORKER ${jobId}] Whisper API response: ${data.words?.length || 0} words`);
+        console.log(`[WORKER ${jobId}] ElevenLabs STT response received`);
 
-        // Transform to [{word, start, end}] format
-        const words = (data.words || []).map(w => ({
-          word: w.word.trim(),
-          start: w.start,
-          end: w.end,
-        }));
+        // Extract word-level timestamps from ElevenLabs response
+        // Response format: { words: [{text, start, end, type}, ...] } or nested in alignment
+        let words = [];
+        if (data.words && Array.isArray(data.words)) {
+          words = data.words
+            .filter(w => w.type === "word" || !w.type)
+            .map(w => ({
+              word: (w.text || w.word || "").trim(),
+              start: w.start,
+              end: w.end,
+            }));
+        } else if (data.alignment && data.alignment.words) {
+          words = data.alignment.words.map(w => ({
+            word: (w.text || w.word || "").trim(),
+            start: w.start,
+            end: w.end,
+          }));
+        }
+
+        console.log(`[WORKER ${jobId}] Extracted ${words.length} words`);
 
         fs.writeFileSync(outputPath, JSON.stringify(words, null, 2));
 
