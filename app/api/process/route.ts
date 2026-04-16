@@ -43,20 +43,27 @@ export async function POST(request: NextRequest) {
       })
     );
 
-    // Spawn worker as a detached child process
-    // Use exec to avoid Turbopack trying to resolve the worker path
-    const { exec: execChild } = await import("child_process");
-    const workerCmd = `node ${path.join(process.cwd(), "worker.mjs")} ${jobId}`;
-    console.log(`[PROCESS] Spawning worker for job ${jobId}`);
+    // Spawn worker as a detached shell command
+    // Use shell string to avoid Turbopack resolving the file path as a module
+    const { spawn } = await import("child_process");
+    const cmd = ["node", path.join(process.cwd(), "worker.mjs"), jobId].join(" ");
 
-    const child = execChild(workerCmd, {
+    console.log(`[PROCESS] Spawning: ${cmd}`);
+
+    const child = spawn(cmd, {
+      detached: true,
+      stdio: ["ignore", "inherit", "inherit"],
+      shell: true,
       env: { ...process.env },
-      maxBuffer: 10 * 1024 * 1024,
+    });
+
+    child.on("error", (err) => {
+      console.error(`[PROCESS] Worker error for ${jobId}:`, err);
     });
 
     child.unref();
 
-    console.log(`[PROCESS] Worker spawned for job ${jobId}`);
+    console.log(`[PROCESS] Worker PID=${child.pid} for ${jobId}`);
 
     return NextResponse.json({ ok: true, jobId });
   } catch (err: unknown) {
