@@ -320,10 +320,16 @@ async function main() {
 7. Concatener video sous-titree + text frame via concat_videos
 8. Enregistrer chaque delivrable avec save_output
 
-## IMPORTANT
-- Pour chaque fichier delivrable final, appelle save_output.
+## IMPORTANT — MODE AUTONOME
+- Tu es en mode AUTONOME. Ne pose JAMAIS de questions a l'utilisateur. Il ne peut pas te repondre.
+- Si le prompt est vague ou incomplet, fais les meilleurs choix possibles et execute.
+- Si la video est plus courte que demande, adapte-toi : produis ce qui est possible avec le contenu disponible.
+- Si le prompt demande un format specifique (ex: Reel), respecte les contraintes de duree (30-90s pour Reels).
+- Pour chaque fichier delivrable final, appelle save_output avec un label clair et une description Instagram si pertinent.
 - Utilise le repertoire de travail fourni pour les fichiers intermediaires.
-- Les videos uploadees sont dans le dossier input/ du job.`;
+- Les videos uploadees sont dans le dossier input/ du job.
+- Choisis automatiquement la couleur accent en extrayant une couleur saturee du decor (frame ~3s) si non fournie.
+- TOUJOURS produire au moins un fichier de sortie. Ne JAMAIS terminer sans appeler save_output.`;
 
   // Tool definitions
   const TOOLS = [
