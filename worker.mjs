@@ -389,9 +389,9 @@ async function main() {
 
       let result;
       try {
-        result = handleToolCall(toolName, toolInput);
+        result = await handleToolCall(toolName, toolInput);
       } catch (toolError) {
-        result = { success: false, result: "", error: toolError.message };
+        result = { success: false, result: "", error: String(toolError?.message || toolError) };
       }
 
       addLog(result.success ? `${toolName} OK: ${result.result.slice(0, 200)}` : `${toolName} ERREUR: ${result.error}`);
