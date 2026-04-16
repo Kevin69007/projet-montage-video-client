@@ -110,7 +110,17 @@ async function main() {
         const videoPath = input.video_path;
         const language = input.language || "fr";
         const outputPath = path.join(workDir, `transcription_${Date.now()}.json`);
-        exec(`python3 "${SCRIPTS_DIR}/transcribe.py" --video "${videoPath}" --output "${outputPath}" --language ${language}`, 1800000);
+        try {
+          exec(`python3 "${SCRIPTS_DIR}/transcribe.py" --video "${videoPath}" --output "${outputPath}" --language ${language}`, 1800000);
+        } catch (transcribeErr) {
+          // Whisper outputs FP16 warning to stderr which causes exec to throw
+          // Check if the output file was created despite the "error"
+          console.log(`[WORKER ${jobId}] Transcribe exec threw: ${transcribeErr.message.slice(0, 100)}`);
+          if (!fs.existsSync(outputPath)) {
+            return { success: false, result: "", error: transcribeErr.message };
+          }
+          console.log(`[WORKER ${jobId}] Transcription file exists despite error — continuing`);
+        }
         if (!fs.existsSync(outputPath)) return { success: false, result: "", error: "Transcription file was not created" };
         const words = JSON.parse(fs.readFileSync(outputPath, "utf-8"));
         const wordCount = words.filter(w => !w.type || w.type === "word").length;

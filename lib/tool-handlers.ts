@@ -82,10 +82,17 @@ function handleTranscribe(
   const language = (input.language as string) || "fr";
   const outputPath = path.join(workDir, `transcription_${Date.now()}.json`);
 
-  exec(
-    `python3 "${SCRIPTS_DIR}/transcribe.py" --video "${videoPath}" --output "${outputPath}" --language ${language}`,
-    1800000
-  );
+  try {
+    exec(
+      `python3 "${SCRIPTS_DIR}/transcribe.py" --video "${videoPath}" --output "${outputPath}" --language ${language}`,
+      1800000
+    );
+  } catch (err: unknown) {
+    // Whisper outputs FP16 warning to stderr — check if output file was created despite the "error"
+    if (!fs.existsSync(outputPath)) {
+      throw err;
+    }
+  }
 
   if (!fs.existsSync(outputPath)) {
     return {
