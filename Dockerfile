@@ -20,15 +20,18 @@ RUN npm install -g @anthropic-ai/claude-code
 # App setup
 WORKDIR /app
 
-# Install Node dependencies (cached layer)
+# Install ALL Node dependencies (devDeps needed for build: tailwindcss, postcss)
 COPY package*.json ./
-RUN npm ci --production
+RUN npm ci
 
 # Copy app source
 COPY . .
 
 # Build Next.js
 RUN npm run build
+
+# Remove devDependencies after build
+RUN npm prune --production
 
 # Create jobs directory
 RUN mkdir -p /app/jobs
