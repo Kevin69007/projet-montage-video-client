@@ -36,6 +36,58 @@ if errorlevel 1 (
 
 echo Docker: OK
 
+REM --- Check Claude auth token ---
+
+if not exist ".env" goto :need_token
+findstr /c:"CLAUDE_CODE_OAUTH_TOKEN" .env >nul 2>&1
+if errorlevel 1 goto :need_token
+goto :token_ok
+
+:need_token
+echo.
+echo =========================================
+echo   CONNEXION CLAUDE (une seule fois)
+echo =========================================
+echo.
+echo Claude CLI a besoin d'un token d'authentification.
+echo.
+
+REM Check if claude is available on host
+where claude >nul 2>&1
+if errorlevel 1 (
+    echo Claude CLI n'est pas installe sur ta machine.
+    echo.
+    echo Pour generer le token :
+    echo   1. Installe Node.js : https://nodejs.org/
+    echo   2. npm install -g @anthropic-ai/claude-code
+    echo   3. claude setup-token
+    echo.
+    echo Puis cree un fichier .env dans ce dossier avec :
+    echo   CLAUDE_CODE_OAUTH_TOKEN=ton_token_ici
+    echo.
+    pause
+    exit /b 1
+)
+
+echo Lance "claude setup-token" pour generer un token.
+echo Si une fenetre de navigateur s'ouvre, connecte-toi avec ton compte Claude.
+echo.
+echo Copie le token affiche et colle-le ci-dessous :
+echo.
+set /p TOKEN="Token: "
+
+if "%TOKEN%"=="" (
+    echo Aucun token entre.
+    pause
+    exit /b 1
+)
+
+echo CLAUDE_CODE_OAUTH_TOKEN=%TOKEN%> .env
+echo Token sauvegarde dans .env
+
+:token_ok
+echo Token Claude: OK
+
 REM --- Build and start ---
 
 echo.
@@ -55,38 +107,6 @@ if errorlevel 1 (
 
 echo Attente du demarrage...
 timeout /t 5 /nobreak >nul
-
-REM --- Check Claude auth ---
-
-echo Verification de la connexion Claude...
-docker compose exec -T app claude -p "say ok" --output-format json --no-session-persistence 2>&1 | findstr /i "not logged in authentication_failed login" >nul
-if not errorlevel 1 (
-    echo.
-    echo =========================================
-    echo   CONNEXION CLAUDE
-    echo =========================================
-    echo.
-    echo Claude n'est pas encore connecte.
-    echo Une fenetre de connexion va s'ouvrir...
-    echo.
-
-    docker compose exec app claude login
-
-    if errorlevel 1 (
-        echo.
-        echo La connexion a echoue. Reessaie en lancant :
-        echo   cd %cd%
-        echo   docker compose exec app claude login
-        echo.
-        docker compose down
-        pause
-        exit /b 1
-    )
-
-    echo.
-    echo Connexion reussie !
-    echo.
-)
 
 REM --- Open browser ---
 

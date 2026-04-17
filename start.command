@@ -34,6 +34,65 @@ fi
 
 echo "Docker: OK"
 
+# --- Check Claude auth token ---
+
+ENV_FILE=".env"
+
+if [ ! -f "$ENV_FILE" ] || ! grep -q "CLAUDE_CODE_OAUTH_TOKEN" "$ENV_FILE" 2>/dev/null; then
+  echo ""
+  echo "========================================="
+  echo "  CONNEXION CLAUDE (une seule fois)"
+  echo "========================================="
+  echo ""
+  echo "Claude CLI a besoin d'un token d'authentification."
+  echo ""
+
+  # Check if claude CLI is available on host
+  CLAUDE_HOST=""
+  if [ -f "$HOME/.local/bin/claude" ]; then
+    CLAUDE_HOST="$HOME/.local/bin/claude"
+  elif command -v claude &>/dev/null; then
+    CLAUDE_HOST="$(command -v claude)"
+  fi
+
+  if [ -n "$CLAUDE_HOST" ]; then
+    echo "Generation du token..."
+    echo "Si une fenetre de navigateur s'ouvre, connecte-toi avec ton compte Claude."
+    echo ""
+    TOKEN=$("$CLAUDE_HOST" setup-token 2>&1 | grep -oE '[a-zA-Z0-9_-]{20,}' | tail -1)
+
+    if [ -n "$TOKEN" ]; then
+      echo "CLAUDE_CODE_OAUTH_TOKEN=$TOKEN" > "$ENV_FILE"
+      echo "Token sauvegarde dans .env"
+    else
+      echo "Impossible de generer le token automatiquement."
+      echo ""
+      echo "Lance manuellement dans un terminal :"
+      echo "  claude setup-token"
+      echo ""
+      echo "Puis copie le token et cree un fichier .env avec :"
+      echo "  CLAUDE_CODE_OAUTH_TOKEN=ton_token_ici"
+      echo ""
+      read -p "Appuie sur Entree pour fermer..."
+      exit 1
+    fi
+  else
+    echo "Claude CLI n'est pas installe sur ta machine."
+    echo ""
+    echo "Pour generer le token, installe Claude CLI :"
+    echo "  npm install -g @anthropic-ai/claude-code"
+    echo "  claude setup-token"
+    echo ""
+    echo "Puis cree un fichier .env dans ce dossier avec :"
+    echo "  CLAUDE_CODE_OAUTH_TOKEN=ton_token_ici"
+    echo ""
+    read -p "Appuie sur Entree pour fermer..."
+    exit 1
+  fi
+fi
+
+echo "Token Claude: OK"
+
 # --- Build and start ---
 
 echo ""
@@ -55,40 +114,6 @@ fi
 # Wait for container to be ready
 echo "Attente du demarrage..."
 sleep 5
-
-# --- Check Claude auth ---
-
-echo "Verification de la connexion Claude..."
-CLAUDE_CHECK=$(docker compose exec -T app claude -p "say ok" --output-format json --no-session-persistence 2>&1)
-
-if echo "$CLAUDE_CHECK" | grep -qi "not logged in\|authentication_failed\|login"; then
-  echo ""
-  echo "========================================="
-  echo "  CONNEXION CLAUDE"
-  echo "========================================="
-  echo ""
-  echo "Claude n'est pas encore connecte."
-  echo "Une fenetre de connexion va s'ouvrir..."
-  echo ""
-
-  # Run claude login interactively inside the container
-  docker compose exec app claude login
-
-  if [ $? -ne 0 ]; then
-    echo ""
-    echo "La connexion a echoue. Reessaie en lancant :"
-    echo "  cd $(pwd)"
-    echo "  docker compose exec app claude login"
-    echo ""
-    read -p "Appuie sur Entree pour fermer..."
-    docker compose down
-    exit 1
-  fi
-
-  echo ""
-  echo "Connexion reussie !"
-  echo ""
-fi
 
 # --- Open browser ---
 
