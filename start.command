@@ -58,26 +58,36 @@ sleep 5
 
 # --- Check Claude auth ---
 
-# Test if Claude is authenticated inside the container
-CLAUDE_CHECK=$(docker compose exec -T app claude -p "say ok" --output-format json 2>&1 | head -1)
+echo "Verification de la connexion Claude..."
+CLAUDE_CHECK=$(docker compose exec -T app claude -p "say ok" --output-format json --no-session-persistence 2>&1)
 
-if echo "$CLAUDE_CHECK" | grep -qi "not logged in\|authentication"; then
+if echo "$CLAUDE_CHECK" | grep -qi "not logged in\|authentication_failed\|login"; then
   echo ""
   echo "========================================="
-  echo "  PREMIERE UTILISATION"
+  echo "  CONNEXION CLAUDE"
   echo "========================================="
   echo ""
   echo "Claude n'est pas encore connecte."
-  echo "Lance cette commande dans un terminal :"
+  echo "Une fenetre de connexion va s'ouvrir..."
   echo ""
-  echo "  cd $(pwd)"
-  echo "  docker compose run --rm app claude login"
+
+  # Run claude login interactively inside the container
+  docker compose exec app claude login
+
+  if [ $? -ne 0 ]; then
+    echo ""
+    echo "La connexion a echoue. Reessaie en lancant :"
+    echo "  cd $(pwd)"
+    echo "  docker compose exec app claude login"
+    echo ""
+    read -p "Appuie sur Entree pour fermer..."
+    docker compose down
+    exit 1
+  fi
+
   echo ""
-  echo "Puis relance ce script."
+  echo "Connexion reussie !"
   echo ""
-  docker compose down
-  read -p "Appuie sur Entree pour fermer..."
-  exit 0
 fi
 
 # --- Open browser ---

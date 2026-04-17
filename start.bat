@@ -58,24 +58,34 @@ timeout /t 5 /nobreak >nul
 
 REM --- Check Claude auth ---
 
-docker compose exec -T app claude -p "say ok" --output-format json 2>&1 | findstr /i "not logged in authentication" >nul
+echo Verification de la connexion Claude...
+docker compose exec -T app claude -p "say ok" --output-format json --no-session-persistence 2>&1 | findstr /i "not logged in authentication_failed login" >nul
 if not errorlevel 1 (
     echo.
     echo =========================================
-    echo   PREMIERE UTILISATION
+    echo   CONNEXION CLAUDE
     echo =========================================
     echo.
     echo Claude n'est pas encore connecte.
-    echo Lance cette commande dans un terminal :
+    echo Une fenetre de connexion va s'ouvrir...
     echo.
-    echo   cd %cd%
-    echo   docker compose run --rm app claude login
+
+    docker compose exec app claude login
+
+    if errorlevel 1 (
+        echo.
+        echo La connexion a echoue. Reessaie en lancant :
+        echo   cd %cd%
+        echo   docker compose exec app claude login
+        echo.
+        docker compose down
+        pause
+        exit /b 1
+    )
+
     echo.
-    echo Puis relance ce script.
+    echo Connexion reussie !
     echo.
-    docker compose down
-    pause
-    exit /b 0
 )
 
 REM --- Open browser ---
