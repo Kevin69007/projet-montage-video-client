@@ -78,11 +78,28 @@ export default function JobPage() {
         {status && !isDone && <JobProgress status={status} />}
 
         {status && isDone && (
-          <VideoResults
-            jobId={jobId}
-            outputs={status.outputs}
-            message={status.message}
-          />
+          <>
+            <VideoResults
+              jobId={jobId}
+              outputs={status.outputs}
+              message={status.message}
+            />
+            {status.log.length > 0 && (
+              <div className="mt-8">
+                <label className="mono-label block mb-2">Log</label>
+                <div className="glass-card p-4 max-h-64 overflow-y-auto">
+                  {status.log.map((entry, i) => (
+                    <p
+                      key={i}
+                      className="text-xs text-text-muted font-mono leading-relaxed"
+                    >
+                      {entry}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
     </main>
