@@ -10,55 +10,38 @@ Upload tes videos, ecris un prompt, et Claude produit des videos montees (teaser
 ## Methode 1 : Docker (recommande — Mac + Windows)
 
 Tout est installe automatiquement dans le conteneur Docker : Node.js, Python, FFmpeg, Whisper, Claude CLI.
-Tu n'installes **que Docker Desktop**.
 
-### Etape 1 — Docker Desktop
+### Pre-requis
 
-**Mac :**
-Telecharge et installe depuis https://www.docker.com/products/docker-desktop/
+1. **Docker Desktop** — telecharge et installe depuis https://www.docker.com/products/docker-desktop/
+   - **Windows** : necessite WSL2 (Docker Desktop le propose a l'installation). Redemarrer le PC si demande.
 
-**Windows :**
-Telecharge et installe depuis https://www.docker.com/products/docker-desktop/
-- Necessite WSL2 (Docker Desktop le propose a l'installation)
-- Redemarrer le PC apres installation si demande
+2. **Claude CLI** (sur ta machine, pas dans Docker) — necessaire uniquement pour generer le token d'authentification :
+   - Installe Node.js si besoin : https://nodejs.org/ (Mac : `brew install node`)
+   - Puis :
+   ```bash
+   npm install -g @anthropic-ai/claude-code
+   ```
 
-### Etape 2 — Premier lancement
+### Premier lancement
 
 **Mac :** Double-clique sur `start.command`
-
 **Windows :** Double-clique sur `start.bat`
 
-Le premier lancement construit l'image Docker (~5-10 min). Ca telecharge :
-- Node.js 20
-- Python 3 + Whisper (~500 MB pour le modele)
-- FFmpeg avec libass (pour les sous-titres)
-- Claude CLI
+Le script fait tout automatiquement :
 
-### Etape 3 — Connecter Claude (une seule fois)
+1. Verifie que Docker est installe et demarre
+2. Genere un token Claude (ouvre ton navigateur pour te connecter — **une seule fois**)
+3. Sauvegarde le token dans un fichier `.env` (valable 1 an)
+4. Construit l'image Docker (~5-10 min la premiere fois)
+5. Demarre le serveur et ouvre http://localhost:3000
 
-Au premier lancement, le script te demandera de connecter Claude.
-Ouvre un terminal et lance :
-
-**Mac :**
-```bash
-cd /chemin/vers/le/projet
-docker compose run --rm app claude login
-```
-
-**Windows (PowerShell ou CMD) :**
-```bash
-cd C:\chemin\vers\le\projet
-docker compose run --rm app claude login
-```
-
-Claude affiche une URL. Ouvre-la dans ton navigateur, connecte-toi avec ton compte Claude. C'est fait.
-
-### Lancer (apres la premiere fois)
+### Lancements suivants
 
 **Mac :** Double-clique `start.command`
 **Windows :** Double-clique `start.bat`
 
-L'interface s'ouvre automatiquement sur http://localhost:3000
+L'interface s'ouvre automatiquement. Pas de login, pas de configuration.
 
 ### Arreter
 
@@ -69,24 +52,35 @@ docker compose down
 
 ### Mise a jour
 
-Pour reconstruire l'image (nouvelle version de Claude CLI, etc.) :
+Pour reconstruire l'image (nouvelle version de Claude CLI, Whisper, etc.) :
 ```bash
 docker compose build --no-cache
 ```
 
-### Depannage Docker
+### Renouveler le token Claude
+
+Le token expire apres 1 an. Pour le renouveler :
+```bash
+claude setup-token
+```
+Puis remplace la ligne `CLAUDE_CODE_OAUTH_TOKEN=...` dans le fichier `.env`.
+
+### Depannage
 
 | Probleme | Solution |
 |----------|----------|
-| "Docker n'est pas demarre" | Lance Docker Desktop |
-| "Not logged in" | `docker compose run --rm app claude login` |
-| Build echoue | Verifie ta connexion internet, relance `docker compose build` |
+| "Docker n'est pas installe" | Telecharge Docker Desktop : https://www.docker.com/products/docker-desktop/ |
+| "Docker n'est pas demarre" | Lance Docker Desktop, puis relance le script |
+| "Claude CLI n'est pas installe" | `npm install -g @anthropic-ai/claude-code` |
+| Token invalide / expire | `claude setup-token` puis mets a jour `.env` |
+| Build Docker echoue | Verifie ta connexion internet, relance `docker compose build` |
 | Port 3000 occupe | Arrete le service qui l'utilise, ou change le port dans `docker-compose.yml` |
-| Transcription lente | Normal : ~1-3 min par minute de video |
+| Transcription lente | Normal : ~1-3 min par minute de video avec Whisper |
+| "Aucun fichier produit" | Verifie les logs dans la page de progression |
 
 ---
 
-## Methode 2 : Installation native (Mac uniquement)
+## Methode 2 : Installation native (Mac uniquement, sans Docker)
 
 Pour ceux qui preferent ne pas utiliser Docker. Necessite d'installer chaque dependance manuellement.
 
@@ -149,6 +143,7 @@ start.bat              <- Double-clic Windows (Docker)
 start-native.command   <- Double-clic Mac (sans Docker)
 Dockerfile             <- Image Docker avec toutes les deps
 docker-compose.yml     <- Config Docker
+.env                   <- Token Claude (genere automatiquement, gitignore)
 app/                   <- Interface web Next.js
 worker.mjs             <- Orchestre Claude CLI pour le pipeline
 pipeline/
