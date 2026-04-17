@@ -9,7 +9,7 @@ Upload tes videos, ecris un prompt, et Claude produit des videos montees (teaser
 
 ## Methode 1 : Docker (recommande — Mac + Windows)
 
-Tout est installe automatiquement dans le conteneur Docker : Node.js, Python, FFmpeg, Whisper, Claude CLI.
+Tout est installe automatiquement dans le conteneur Docker : Node.js, Python, FFmpeg, Whisper, Claude CLI, nano-banana (generation miniatures IA).
 
 ### Pre-requis
 
@@ -24,6 +24,11 @@ Tout est installe automatiquement dans le conteneur Docker : Node.js, Python, FF
    ```
    Le script `start.command` extrait ensuite le token automatiquement depuis ton trousseau macOS.
 
+3. **Cle API Gemini** (pour les miniatures IA) — gratuite :
+   - Va sur https://aistudio.google.com/apikey
+   - Cree une cle API
+   - Le script te la demandera au premier lancement
+
 ### Premier lancement
 
 **Mac :** Double-clique sur `start.command`
@@ -33,8 +38,9 @@ Le script fait tout automatiquement :
 
 1. Verifie que Docker est installe et demarre
 2. Extrait le token Claude depuis le trousseau macOS (une seule fois, sauvegarde dans `.env`)
-3. Construit l'image Docker (~5-10 min la premiere fois)
-4. Demarre le serveur et ouvre http://localhost:3000
+3. Demande la cle Gemini pour les miniatures IA (une seule fois)
+4. Construit l'image Docker (~5-10 min la premiere fois)
+5. Demarre le serveur et ouvre http://localhost:3000
 
 ### Lancements suivants
 

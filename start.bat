@@ -88,6 +88,29 @@ echo Token sauvegarde dans .env
 :token_ok
 echo Token Claude: OK
 
+REM --- Check Gemini API key ---
+
+findstr /c:"GEMINI_API_KEY=" .env >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo =========================================
+    echo   GEMINI API KEY (pour les miniatures)
+    echo =========================================
+    echo.
+    echo Pour generer des miniatures avec l'IA :
+    echo   1. Va sur https://aistudio.google.com/apikey
+    echo   2. Cree une cle API
+    echo   3. Colle-la ici :
+    echo.
+    set /p GEMINI_KEY="Gemini API Key: "
+    if not "!GEMINI_KEY!"=="" (
+        echo GEMINI_API_KEY=!GEMINI_KEY!>> .env
+        echo Cle Gemini sauvegardee.
+    ) else (
+        echo Pas de cle Gemini — miniatures AI desactivees.
+    )
+)
+
 REM --- Build and start ---
 
 echo.

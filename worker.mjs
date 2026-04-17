@@ -274,56 +274,55 @@ TOUJOURS produire au moins un fichier. Ne JAMAIS terminer sans sauvegarder.
 
 Quand le mode est "miniature", tu produis des IMAGES de miniature (thumbnails) pour YouTube/Instagram, PAS des videos.
 
+### Outil principal : nano-banana (generation IA via Gemini)
+
+\`nano-banana\` est un outil CLI qui genere des images avec l'IA (Gemini). Il peut prendre une image de reference pour reproduire son style.
+
+**Commande de base :**
+\`\`\`bash
+nano-banana "<description detaillee de la miniature>" -r "<reference.jpg>" -r "<frame.jpg>" -o "<nom_sortie>" -s 1K -a 16:9 -d "<output_dir>"
+\`\`\`
+
+**Parametres :**
+- Le PROMPT doit decrire precisement la miniature voulue (style, couleurs, texte, composition)
+- \`-r\` : image(s) de reference (style a reproduire) — tu peux en mettre plusieurs
+- \`-r\` : tu peux aussi passer la frame extraite de la video comme deuxieme reference
+- \`-o\` : nom du fichier de sortie (sans extension)
+- \`-s 1K\` : resolution 1024px
+- \`-a 16:9\` : ratio YouTube (1280x720)
+- \`-d\` : dossier de sortie
+
 ### Pipeline miniature
-1. **Analyser la video** — Extraire 8-12 frames candidats a des moments cles :
+1. **Analyser la video** — Extraire 5-8 frames candidats a des moments cles :
    \`ffmpeg -y -ss <timestamp> -i "<video>" -frames:v 1 "<output.jpg>"\`
-   Choisis des moments expressifs : reactions, gestes, emotions, moments forts.
+   Choisis des moments expressifs : reactions, gestes, emotions, visage.
 
 2. **Analyser l'image de reference** — Lis l'image de reference avec l'outil Read pour comprendre :
-   - La composition (cadrage, placement du texte, layout)
-   - Le fond (couleur unie, degrade, motif, photo)
-   - Le style visuel (couleurs dominantes, contraste, effets)
-   - La typographie (taille, style, position, couleur, ombre, contour)
-   - Les elements decoratifs (bordures, emojis, icones, formes, cadres)
-   - Le placement de la photo/video (plein ecran, encadre, incline, avec bordure)
+   - Le style global (couleurs, fond, ambiance)
+   - La composition (placement photo, texte, decorations)
+   - Le type de miniature (YouTube food, gaming, vlog, education, etc.)
 
-3. **Selectionner les meilleures frames** — Choisir les frames les plus expressives.
+3. **Generer chaque miniature avec nano-banana** :
+   - Miniature 1 (style fidele) :
+     \`\`\`bash
+     nano-banana "YouTube thumbnail. [DESCRIPTION PRECISE DU STYLE DE LA REFERENCE]. Use the person/subject from the second reference image. [TEXTE SI FOURNI]. Match the exact style, colors, layout, and decorations of the first reference image." -r "<reference.jpg>" -r "<meilleure_frame.jpg>" -o "miniature_1" -s 1K -a 16:9 -d "<output_dir>"
+     \`\`\`
+   - Miniature 2+ (style creatif) :
+     \`\`\`bash
+     nano-banana "YouTube thumbnail. [VARIANTE CREATIVE INSPIREE DE LA REFERENCE]. Use the person/subject from the second reference image but with a different pose/expression. More creative and bold composition." -r "<reference.jpg>" -r "<autre_frame.jpg>" -o "miniature_2" -s 1K -a 16:9 -d "<output_dir>"
+     \`\`\`
 
-4. **Ecrire un script Python custom** — NE PAS utiliser generate_thumbnail.py si la reference est complexe.
-   Ecris plutot un script Python/Pillow CUSTOM dans le repertoire de travail qui reproduit fidelement le style :
-   \`\`\`python
-   from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
-   # Analyser la reference et reproduire :
-   # - Fond colore (ex: rose #FF69B4)
-   # - Photo du speaker dans un cadre incline avec bordure blanche
-   # - Texte gros avec ombre et couleur specifique
-   # - Elements decoratifs (barres, formes, emojis)
-   # - Resolution 1280x720
-   \`\`\`
-
-   **IMPORTANT** : Le script doit reproduire le STYLE de la reference, pas juste mettre du texte sur une frame.
-   Exemples de ce que tu peux faire avec Pillow :
-   - Fond uni/degrade : \`Image.new('RGB', (1280, 720), (255, 105, 180))\`
-   - Rotation d'image : \`frame.rotate(angle, expand=True)\`
-   - Bordure blanche : dessiner un rectangle blanc plus grand derriere la frame
-   - Ombre portee : coller une version noire decalee sous la frame
-   - Texte avec contour : dessiner le texte en noir decale, puis en couleur par-dessus
-   - Formes decoratives : \`draw.rectangle()\`, \`draw.ellipse()\`, \`draw.line()\`
-   - Redimensionner : \`img.resize((w, h), Image.LANCZOS)\`
-   - Coller une image sur une autre : \`bg.paste(frame, (x, y))\`
-
-   Pour le texte, utilise la police : \`${FONTS_DIR}/BigShoulders-Black.ttf\`
-
-5. **Sauvegarder** — Copier dans output/ et ecrire outputs.json
+4. **Sauvegarder** — Les fichiers sont deja dans output_dir via \`-d\`. Ecrire outputs.json.
 
 ### Regles miniature
-- Miniature 1 : Reproduire le style de la reference aussi fidelement que possible (meme fond, meme layout, meme style de texte)
-- Miniature 2+ : Meme style general mais composition differente (autre frame, texte different, variante creative)
-- Resolution : 1280x720 (YouTube standard)
-- Format : JPEG haute qualite (\`img.save(path, 'JPEG', quality=95)\`)
-- Le texte est OPTIONNEL — ne l'ajouter que si l'utilisateur l'a fourni
-- Choisir des frames DIFFERENTES pour chaque miniature
-- TOUJOURS ecrire et executer un script Python custom — ne jamais juste copier une frame brute`;
+- TOUJOURS utiliser nano-banana pour generer les miniatures (pas Pillow)
+- Passer la reference ET une frame video comme references (-r -r)
+- Le prompt a nano-banana doit etre TRES detaille : decrire les couleurs, le layout, le style de texte, les decorations
+- Miniature 1 : reproduire fidelement le style de la reference
+- Miniature 2+ : variante creative, frame differente
+- Si nano-banana echoue (GEMINI_API_KEY non configure), fallback sur un script Pillow simple
+- Resolution : utiliser \`-s 1K -a 16:9\` pour format YouTube
+- TOUJOURS produire au moins une miniature`;
 }
 
 // --- Build user prompt ---

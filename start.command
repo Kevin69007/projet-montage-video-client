@@ -76,6 +76,34 @@ fi
 
 echo "Token Claude: OK"
 
+# --- Check Gemini API key (for AI thumbnail generation) ---
+
+if ! grep -q "GEMINI_API_KEY=" "$ENV_FILE" 2>/dev/null; then
+  echo ""
+  echo "========================================="
+  echo "  GEMINI API KEY (pour les miniatures)"
+  echo "========================================="
+  echo ""
+  echo "Pour generer des miniatures avec l'IA, tu as besoin"
+  echo "d'une cle API Gemini (gratuite)."
+  echo ""
+  echo "1. Va sur https://aistudio.google.com/apikey"
+  echo "2. Cree une cle API"
+  echo "3. Colle-la ici :"
+  echo ""
+  read -p "Gemini API Key: " GEMINI_KEY
+
+  if [ -n "$GEMINI_KEY" ]; then
+    echo "GEMINI_API_KEY=$GEMINI_KEY" >> "$ENV_FILE"
+    echo "Cle Gemini sauvegardee."
+  else
+    echo "Pas de cle Gemini — les miniatures AI ne fonctionneront pas."
+    echo "(Tu peux l'ajouter plus tard dans .env : GEMINI_API_KEY=ta_cle)"
+  fi
+fi
+
+echo "Gemini: $(grep -q 'GEMINI_API_KEY=' "$ENV_FILE" 2>/dev/null && echo 'OK' || echo 'Non configure')"
+
 # --- Build and start ---
 
 echo ""
