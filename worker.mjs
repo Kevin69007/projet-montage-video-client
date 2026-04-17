@@ -176,13 +176,22 @@ async function main() {
       case "cut_video": {
         const segments = input.segments;
         if (!segments || segments.length === 0) return { success: false, result: "", error: "No segments provided" };
+        const aspectRatio = input.aspect_ratio || null; // e.g. "9:16", "1:1", "16:9"
         const inputs = segments.map(s => `-ss ${s.start} -to ${s.end} -i "${input.input_path}"`).join(" ");
         const filterParts = segments.map((_, i) => `[${i}:v]setpts=PTS-STARTPTS[v${i}];[${i}:a]asetpts=PTS-STARTPTS[a${i}]`).join(";");
         const concatInputs = segments.map((_, i) => `[v${i}][a${i}]`).join("");
-        const filterComplex = `${filterParts};${concatInputs}concat=n=${segments.length}:v=1:a=1[outv][outa]`;
+        let postFilter = "";
+        if (aspectRatio === "9:16") {
+          // Crop center to 9:16, then scale to 1080x1920
+          postFilter = `;[outv]crop=ih*9/16:ih[cropped];[cropped]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[outv2]`;
+        } else if (aspectRatio === "1:1") {
+          postFilter = `;[outv]crop=min(iw\\,ih):min(iw\\,ih)[cropped];[cropped]scale=1080:1080[outv2]`;
+        }
+        const outVLabel = postFilter ? "outv2" : "outv";
+        const filterComplex = `${filterParts};${concatInputs}concat=n=${segments.length}:v=1:a=1[outv][outa]${postFilter}`;
         const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
-        exec(`${ffmpeg} -y ${inputs} -filter_complex "${filterComplex}" -map "[outv]" -map "[outa]" -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2 "${input.output_path}"`, 600000);
-        return { success: true, result: `Video cut into ${segments.length} segments → ${input.output_path}` };
+        exec(`${ffmpeg} -y ${inputs} -filter_complex "${filterComplex}" -map "[${outVLabel}]" -map "[outa]" -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2 "${input.output_path}"`, 600000);
+        return { success: true, result: `Video cut into ${segments.length} segments${aspectRatio ? ` (${aspectRatio})` : ""} → ${input.output_path}` };
       }
       case "burn_subtitles": {
         const style = input.style || "hormozi";
@@ -355,6 +364,8 @@ Pour chaque video produite, generer une description Instagram :
 - Commencer par le HOOK le plus fort (pas forcement chronologique)
 - Finir sur une punchline ou un cliffhanger
 - Supprimer tous les silences et hesitations
+- Pour Instagram/TikTok : TOUJOURS utiliser aspect_ratio "9:16" dans cut_video (vertical, 1080x1920)
+- Si la source est 16:9 (horizontale), cut_video avec aspect_ratio "9:16" crop automatiquement au centre
 
 ### Version longue nettoyee
 - Garder l'integralite du contenu
@@ -429,7 +440,7 @@ Pour chaque video produite, generer une description Instagram :
   // Tool definitions
   const TOOLS = [
     { name: "transcribe_video", description: "Transcribe video with Whisper (word-level timestamps).", input_schema: { type: "object", properties: { video_path: { type: "string" }, language: { type: "string" } }, required: ["video_path"] } },
-    { name: "cut_video", description: "Cut and assemble segments using FFmpeg concat filter.", input_schema: { type: "object", properties: { input_path: { type: "string" }, segments: { type: "array", items: { type: "object", properties: { start: { type: "number" }, end: { type: "number" } }, required: ["start", "end"] } }, output_path: { type: "string" } }, required: ["input_path", "segments", "output_path"] } },
+    { name: "cut_video", description: "Cut and assemble segments using FFmpeg concat filter. Supports aspect ratio conversion (9:16 for Reels, 1:1 for feed).", input_schema: { type: "object", properties: { input_path: { type: "string" }, segments: { type: "array", items: { type: "object", properties: { start: { type: "number" }, end: { type: "number" } }, required: ["start", "end"] } }, output_path: { type: "string" }, aspect_ratio: { type: "string", description: "Target aspect ratio: '9:16' for Reels/TikTok, '1:1' for Instagram feed. Omit to keep original." } }, required: ["input_path", "segments", "output_path"] } },
     { name: "burn_subtitles", description: "Burn styled subtitles (Hormozi/Cove).", input_schema: { type: "object", properties: { video_path: { type: "string" }, transcription_path: { type: "string" }, style: { type: "string", enum: ["hormozi", "cove", "mrbeast", "karaoke", "boxed", "minimal", "neon"] }, accent_color: { type: "string" }, output_path: { type: "string" }, font_size: { type: "number" }, words_per_line: { type: "number" }, max_lines: { type: "number" } }, required: ["video_path", "transcription_path", "style", "accent_color", "output_path"] } },
     { name: "generate_text_frame", description: "Generate animated text frame video (4s, 1080x1920).", input_schema: { type: "object", properties: { lines: { type: "array", items: { type: "string" } }, punchline_index: { type: "number" }, output_path: { type: "string" }, accent_color: { type: "string" }, font_size: { type: "number" } }, required: ["lines", "punchline_index", "output_path"] } },
     { name: "concat_videos", description: "Concatenate videos using FFmpeg concat filter.", input_schema: { type: "object", properties: { video_paths: { type: "array", items: { type: "string" } }, output_path: { type: "string" } }, required: ["video_paths", "output_path"] } },
