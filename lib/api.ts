@@ -48,12 +48,16 @@ export async function uploadFiles(
 export async function startProcessing(params: {
   jobId: string;
   prompt: string;
+  mode: "video" | "miniature";
   style: string;
   accentColor?: string;
   videoType: string;
   duration: number;
   format: string;
   language: string;
+  thumbnailCount?: number;
+  thumbnailText?: string;
+  referenceFileName?: string;
 }): Promise<{ ok: boolean }> {
   const res = await fetch(`${API_BASE}/api/process`, {
     method: "POST",

@@ -6,7 +6,7 @@ interface JobProgressProps {
   status: JobStatus;
 }
 
-const PIPELINE_STEPS = [
+const VIDEO_STEPS = [
   "Initialisation",
   "Analyse video",
   "Transcription",
@@ -20,10 +20,25 @@ const PIPELINE_STEPS = [
   "Termine",
 ];
 
+const MINIATURE_STEPS = [
+  "Initialisation",
+  "Analyse",
+  "Extraction frames",
+  "Composition",
+  "Sauvegarde",
+  "Termine",
+];
+
 export default function JobProgress({ status }: JobProgressProps) {
-  const currentStepIndex = PIPELINE_STEPS.findIndex(
-    (s) => s === status.step
-  );
+  // Auto-detect mode from step names
+  const isMiniature =
+    status.step === "Extraction frames" ||
+    status.step === "Composition" ||
+    // Check log for miniature mode indicator
+    status.log.some((l) => l.includes("generate_thumbnail") || l.includes("Mode: MINIATURE"));
+
+  const steps = isMiniature ? MINIATURE_STEPS : VIDEO_STEPS;
+  const currentStepIndex = steps.findIndex((s) => s === status.step);
 
   return (
     <div className="space-y-6">
@@ -47,7 +62,7 @@ export default function JobProgress({ status }: JobProgressProps) {
 
       {/* Steps */}
       <div className="space-y-1">
-        {PIPELINE_STEPS.map((step, i) => {
+        {steps.map((step, i) => {
           let stepClass = "step-pending";
           let icon = "\u25CB"; // ○
           if (i < currentStepIndex) {

@@ -20,7 +20,7 @@ function findClaude(): string | null {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { jobId, prompt, style, accentColor, videoType, duration, format, language } = body;
+    const { jobId, prompt, mode, style, accentColor, videoType, duration, format, language, thumbnailCount, thumbnailText, referenceFileName } = body;
 
     if (!jobId || !prompt) {
       return NextResponse.json(
@@ -59,12 +59,16 @@ export async function POST(request: NextRequest) {
       paramsPath,
       JSON.stringify({
         prompt,
+        mode: mode || "video",
         style: style || "hormozi",
         accentColor: accentColor || "",
         videoType: videoType || "teaser",
         duration: duration || 30,
         format: format || "9:16",
         language: language || "fr",
+        thumbnailCount: thumbnailCount || 2,
+        thumbnailText: thumbnailText || "",
+        referenceFileName: referenceFileName || "",
         fileNames,
       })
     );

@@ -268,12 +268,74 @@ TOUJOURS produire au moins un fichier. Ne JAMAIS terminer sans sauvegarder.
 - Ne JAMAIS utiliser les timestamps bruts sans transcrire d'abord
 - Marge de fin trop courte (0.2-0.3s) = mots coupes. Minimum 0.5s
 - Segment avant silence : utiliser 0.7-1.0s de marge (pas 0.5s)
-- Ne JAMAIS utiliser -f concat (demuxer). Toujours le concat FILTER.`;
+- Ne JAMAIS utiliser -f concat (demuxer). Toujours le concat FILTER.
+
+## MODE MINIATURE (THUMBNAIL)
+
+Quand le mode est "miniature", tu produis des IMAGES de miniature (thumbnails) pour YouTube/Instagram, PAS des videos.
+
+### Pipeline miniature
+1. **Analyser la video** — Extraire 8-12 frames candidats a des moments cles :
+   \`ffmpeg -y -ss <timestamp> -i "<video>" -frames:v 1 "<output.jpg>"\`
+   Choisis des moments expressifs : reactions, gestes, emotions, moments forts.
+
+2. **Analyser l'image de reference** — Lis l'image de reference avec l'outil Read pour comprendre :
+   - La composition (cadrage, placement du texte, layout)
+   - Le fond (couleur unie, degrade, motif, photo)
+   - Le style visuel (couleurs dominantes, contraste, effets)
+   - La typographie (taille, style, position, couleur, ombre, contour)
+   - Les elements decoratifs (bordures, emojis, icones, formes, cadres)
+   - Le placement de la photo/video (plein ecran, encadre, incline, avec bordure)
+
+3. **Selectionner les meilleures frames** — Choisir les frames les plus expressives.
+
+4. **Ecrire un script Python custom** — NE PAS utiliser generate_thumbnail.py si la reference est complexe.
+   Ecris plutot un script Python/Pillow CUSTOM dans le repertoire de travail qui reproduit fidelement le style :
+   \`\`\`python
+   from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
+   # Analyser la reference et reproduire :
+   # - Fond colore (ex: rose #FF69B4)
+   # - Photo du speaker dans un cadre incline avec bordure blanche
+   # - Texte gros avec ombre et couleur specifique
+   # - Elements decoratifs (barres, formes, emojis)
+   # - Resolution 1280x720
+   \`\`\`
+
+   **IMPORTANT** : Le script doit reproduire le STYLE de la reference, pas juste mettre du texte sur une frame.
+   Exemples de ce que tu peux faire avec Pillow :
+   - Fond uni/degrade : \`Image.new('RGB', (1280, 720), (255, 105, 180))\`
+   - Rotation d'image : \`frame.rotate(angle, expand=True)\`
+   - Bordure blanche : dessiner un rectangle blanc plus grand derriere la frame
+   - Ombre portee : coller une version noire decalee sous la frame
+   - Texte avec contour : dessiner le texte en noir decale, puis en couleur par-dessus
+   - Formes decoratives : \`draw.rectangle()\`, \`draw.ellipse()\`, \`draw.line()\`
+   - Redimensionner : \`img.resize((w, h), Image.LANCZOS)\`
+   - Coller une image sur une autre : \`bg.paste(frame, (x, y))\`
+
+   Pour le texte, utilise la police : \`${FONTS_DIR}/BigShoulders-Black.ttf\`
+
+5. **Sauvegarder** — Copier dans output/ et ecrire outputs.json
+
+### Regles miniature
+- Miniature 1 : Reproduire le style de la reference aussi fidelement que possible (meme fond, meme layout, meme style de texte)
+- Miniature 2+ : Meme style general mais composition differente (autre frame, texte different, variante creative)
+- Resolution : 1280x720 (YouTube standard)
+- Format : JPEG haute qualite (\`img.save(path, 'JPEG', quality=95)\`)
+- Le texte est OPTIONNEL — ne l'ajouter que si l'utilisateur l'a fourni
+- Choisir des frames DIFFERENTES pour chaque miniature
+- TOUJOURS ecrire et executer un script Python custom — ne jamais juste copier une frame brute`;
 }
 
 // --- Build user prompt ---
 
 function buildUserPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath) {
+  if (params.mode === "miniature") {
+    return buildMiniaturePrompt(params, videoPaths, workDir, outputDir, outputsJsonPath);
+  }
+  return buildVideoPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath);
+}
+
+function buildVideoPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath) {
   const videoList = videoPaths.map((p, i) => `- Video ${i + 1}: ${p}`).join("\n");
   const durationInfo = params.videoType === "teaser"
     ? `\nDuree cible: ${params.duration} secondes MAXIMUM (STRICT — ne pas depasser de plus de 3s)`
@@ -282,7 +344,6 @@ function buildUserPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath
     ? `\nFormat: ${params.format} (ajouter crop ${params.format} dans la commande ffmpeg de coupe)`
     : "";
 
-  // Load style config for the prompt
   let styleInfo = `Style sous-titres: ${params.style}`;
   try {
     const styles = JSON.parse(fs.readFileSync(path.join(PIPELINE_DIR, "styles.json"), "utf-8"));
@@ -293,7 +354,9 @@ function buildUserPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath
     }
   } catch (_) {}
 
-  return `Voici les videos uploadees :
+  return `Mode: VIDEO
+
+Voici les videos uploadees :
 ${videoList}
 
 Repertoire de travail : ${workDir}
@@ -314,15 +377,67 @@ Langue : ${params.language || "fr"}${params.accentColor ? `\nCouleur accent : ${
 ${params.prompt}`;
 }
 
+function buildMiniaturePrompt(params, videoPaths, workDir, outputDir, outputsJsonPath) {
+  const inputDir = path.join(jobDir, "input");
+
+  // Separate video files from reference image
+  const videoFiles = [];
+  let referenceFile = "";
+  for (const f of params.fileNames) {
+    if (params.referenceFileName && f.includes(params.referenceFileName.replace(/[^a-zA-Z0-9._-]/g, "_"))) {
+      referenceFile = path.join(inputDir, f);
+    } else if (/\.(jpg|jpeg|png|webp|gif)$/i.test(f)) {
+      // If no explicit reference match, treat image files as reference
+      if (!referenceFile) referenceFile = path.join(inputDir, f);
+    } else {
+      videoFiles.push(path.join(inputDir, f));
+    }
+  }
+
+  const videoList = videoFiles.map((p, i) => `- Video ${i + 1}: ${p}`).join("\n");
+
+  return `Mode: MINIATURE
+
+## Fichiers
+Video(s) source :
+${videoList}
+
+Image de reference : ${referenceFile}
+
+Repertoire de travail : ${workDir}
+Repertoire de sortie : ${outputDir}
+Fichier manifeste : ${outputsJsonPath}
+
+## Parametres
+Nombre de miniatures a produire : ${params.thumbnailCount || 2}${params.thumbnailText ? `\nTexte a ajouter : "${params.thumbnailText}"` : ""}${params.accentColor ? `\nCouleur accent : ${params.accentColor}` : ""}
+
+## INSTRUCTIONS
+1. Extrais 8-12 frames de la video a des moments expressifs/interessants (utilise ffmpeg -ss)
+2. Lis et analyse l'image de reference pour comprendre son style visuel
+3. Pour la miniature 1 : utilise generate_thumbnail.py avec --style match pour reproduire fidelement le style de la reference
+4. Pour les miniatures suivantes : utilise --style creative pour des variations plus audacieuses
+5. Utilise des frames DIFFERENTES pour chaque miniature
+6. SAUVEGARDE : Copie chaque miniature dans ${outputDir}/ et ecris le manifeste ${outputsJsonPath}
+
+## Prompt de l'utilisateur :
+${params.prompt}`;
+}
+
 // --- Progress detection from stream-json ---
 
 function detectProgress(line) {
   const text = typeof line === "string" ? line : JSON.stringify(line);
+
+  // Miniature mode progress
+  if (text.includes("generate_thumbnail.py")) return { step: "Composition", progress: 70, message: "Composition de la miniature..." };
+  if (text.includes("frames:v 1")) return { step: "Extraction frames", progress: 30, message: "Extraction des frames..." };
+
+  // Video mode progress
   if (text.includes("transcribe.py")) return { step: "Transcription", progress: 20, message: "Transcription Whisper en cours..." };
   if (text.includes("ffprobe")) return { step: "Analyse", progress: 10, message: "Analyse du fichier video..." };
   if (text.includes("ffmpeg") && (text.includes("-ss") || text.includes("concat"))) {
-    if (text.includes("burn_subtitles") || text.includes(".ass")) return null; // subtitle burning, handled below
-    if (text.includes("text_frame") || text.includes("generate_text_frame")) return null; // text frame, handled below
+    if (text.includes("burn_subtitles") || text.includes(".ass")) return null;
+    if (text.includes("text_frame") || text.includes("generate_text_frame")) return null;
     return { step: "Decoupe", progress: 40, message: "Decoupe et assemblage des segments..." };
   }
   if (text.includes("burn_subtitles")) return { step: "Sous-titres", progress: 65, message: "Application des sous-titres..." };
@@ -372,7 +487,13 @@ async function main() {
   fs.writeFileSync(userPromptPath, userPrompt);
 
   updateStatus({ status: "processing", step: "Initialisation", progress: 5, message: "Demarrage du pipeline Claude..." });
-  addLog(`Demarrage avec ${params.fileNames.length} video(s)`);
+  if (params.mode === "miniature") {
+    const videoCount = params.fileNames.filter(f => /\.(mp4|mov|avi|mkv|webm)$/i.test(f)).length;
+    const imageCount = params.fileNames.filter(f => /\.(jpg|jpeg|png|webp|gif)$/i.test(f)).length;
+    addLog(`Mode miniature — ${videoCount} video(s), ${imageCount} image(s) reference`);
+  } else {
+    addLog(`Demarrage avec ${params.fileNames.length} video(s)`);
+  }
 
   // Spawn Claude CLI
   const args = [

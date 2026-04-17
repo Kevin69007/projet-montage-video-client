@@ -49,6 +49,7 @@ function OutputCard({
   const [copied, setCopied] = useState(false);
   const url = getDownloadUrl(jobId, output.file);
   const isVideo = /\.(mp4|mov|webm)$/i.test(output.file);
+  const isImage = /\.(jpg|jpeg|png|webp)$/i.test(output.file);
 
   const copyDescription = () => {
     navigator.clipboard.writeText(output.description);
@@ -85,6 +86,17 @@ function OutputCard({
             controls
             className="w-full max-h-[500px] mx-auto"
             preload="metadata"
+          />
+        </div>
+      )}
+
+      {/* Image preview */}
+      {isImage && (
+        <div className="bg-black p-4">
+          <img
+            src={url}
+            alt={output.label}
+            className="w-full max-h-[500px] object-contain mx-auto"
           />
         </div>
       )}
