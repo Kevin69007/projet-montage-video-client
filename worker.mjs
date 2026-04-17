@@ -377,10 +377,52 @@ Pour chaque video produite, generer une description Instagram :
 8. concat_videos — assembler video + text frame
 9. save_output — enregistrer chaque delivrable
 
+## METHODE DE DECOUPE AVANCEE (issue des corrections de Kevin)
+
+### Workflow decoupe — OBLIGATOIRE
+1. Transcrire chaque clip source (word_timestamps)
+2. Analyser la transcription pour reperer : faux departs (phrase commencee puis reprise), doublons (meme replique dite 2+ fois), silences morts entre prises
+3. Isoler uniquement la meilleure prise complete
+4. Couper serre avec les marges (voir regles de coupe ci-dessus)
+5. Verifier : si la duree d'un segment depasse 2x la duree attendue de la replique = doublon probable, re-analyser
+
+### Checklist pre-cut (a verifier AVANT chaque assemblage)
+- Chaque clip source a ete transcrit avec word_timestamps
+- Les faux departs et doublons ont ete identifies et exclus
+- Les timestamps de cut sont bases sur la transcription, pas sur des estimations
+- La marge de fin est >= 0.5s apres le dernier mot
+- Si un segment est suivi de silence (text frame, noir) : marge de fin >= 0.7s
+- L'assemblage utilise le concat filter (PAS le concat demuxer -f concat)
+
+### Regles de rythme (deduites des corrections de Kevin — format Reels)
+- Entre segments (hook, chute, transition) : max 0.2-0.3s de silence
+- Pauses intra-replique > 1s : les couper (silences de reflexion)
+- Ne jamais couper les mots, uniquement les silences
+- Avant premier mot : 0.1s de marge
+- Apres dernier mot : 0.5s (0.7-1.0s si suivi de silence/text frame)
+- Gap scanning : apres transcription, scanner les gaps > 0.5s entre word.end et next_word.start
+
+### Pipeline complet de production hook
+1. Transcrire clip source
+2. Analyser transcription : faux departs, doublons, identifier meilleure prise
+3. Couper segments (hook + chute + transition) via concat filter multi-input
+4. Supprimer silences : gaps > 0.5s entre mots via concat filter
+5. Extraire couleur accent du decor (frame ~3s)
+6. Bruler sous-titres Hormozi via burn_subtitles (90px, 3wpl, 2 lignes)
+7. Generer text frame video via generate_text_frame
+8. Concat video sous-titree + text frame -> fichier final
+9. Enregistrer avec save_output
+
+### Erreurs a eviter
+- Ne JAMAIS utiliser les timestamps bruts sans transcrire d'abord
+- Ne JAMAIS prendre un segment >5s sans verifier qu'il ne contient qu'une prise
+- Marge de fin trop courte (0.2-0.3s) = mots coupes. Minimum 0.5s apres le dernier mot
+- Segment avant silence : la marge standard (0.5s) ne suffit pas. Le silence expose la troncature. Utiliser 0.7-1.0s
+
 ## FICHIERS
 - Repertoire de travail : fourni dans le message
 - Videos source : dans le dossier input/ du job
-- Appelle save_output pour CHAQUE fichier final avec un label clair et une description Instagram`;
+- Appelle save_output pour CHAQUE fichier final avec un label clair et une description Instagram
 - Choisis automatiquement la couleur accent en extrayant une couleur saturee du decor (frame ~3s) si non fournie.
 - TOUJOURS produire au moins un fichier de sortie. Ne JAMAIS terminer sans appeler save_output.`;
 
