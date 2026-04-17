@@ -7,7 +7,7 @@ services:
       # Job files (uploads + outputs) persisted on host
       - ./jobs:/app/jobs
       # Claude CLI auth tokens (from 'docker compose run --rm app claude login')
-      - claude-auth:/root/.claude
+      - claude-auth:/home/appuser/.claude
     environment:
       - FFMPEG_PATH=ffmpeg
       - FONTS_DIR=/app/pipeline/fonts

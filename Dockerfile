@@ -17,6 +17,9 @@ RUN python3 -c "import whisper; whisper.load_model('small')"
 # Claude CLI (auth tokens will be mounted from host)
 RUN npm install -g @anthropic-ai/claude-code
 
+# Create non-root user (Claude CLI refuses --dangerously-skip-permissions as root)
+RUN useradd -m -s /bin/bash appuser
+
 # App setup
 WORKDIR /app
 
@@ -33,13 +36,20 @@ RUN npm run build
 # Remove devDependencies after build
 RUN npm prune --production
 
-# Create jobs directory
-RUN mkdir -p /app/jobs
+# Create jobs directory and set ownership
+RUN mkdir -p /app/jobs && chown -R appuser:appuser /app
+
+# Copy Whisper model cache to appuser's home
+RUN cp -r /root/.cache /home/appuser/.cache && chown -R appuser:appuser /home/appuser/.cache
+
+# Switch to non-root user
+USER appuser
 
 # Environment
 ENV FFMPEG_PATH=ffmpeg
 ENV FONTS_DIR=/app/pipeline/fonts
 ENV NODE_ENV=production
+ENV HOME=/home/appuser
 
 EXPOSE 3000
 

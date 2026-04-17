@@ -382,7 +382,7 @@ async function main() {
     "--verbose",
     "--system-prompt", systemPrompt,
     "--tools", "Bash,Read,Write",
-    "--dangerously-skip-permissions",
+    "--permission-mode", "bypassPermissions",
     "--add-dir", jobDir,
     "--add-dir", PIPELINE_DIR,
     "--model", "sonnet",
