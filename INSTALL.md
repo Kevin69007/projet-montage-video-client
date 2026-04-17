@@ -16,12 +16,13 @@ Tout est installe automatiquement dans le conteneur Docker : Node.js, Python, FF
 1. **Docker Desktop** — telecharge et installe depuis https://www.docker.com/products/docker-desktop/
    - **Windows** : necessite WSL2 (Docker Desktop le propose a l'installation). Redemarrer le PC si demande.
 
-2. **Claude CLI** (sur ta machine, pas dans Docker) — necessaire uniquement pour generer le token d'authentification :
-   - Installe Node.js si besoin : https://nodejs.org/ (Mac : `brew install node`)
-   - Puis :
+2. **Etre connecte a Claude** — tu dois avoir fait `claude login` au moins une fois sur ta machine.
+   Si ce n'est pas le cas :
    ```bash
    npm install -g @anthropic-ai/claude-code
+   claude login
    ```
+   Le script `start.command` extrait ensuite le token automatiquement depuis ton trousseau macOS.
 
 ### Premier lancement
 
@@ -31,10 +32,9 @@ Tout est installe automatiquement dans le conteneur Docker : Node.js, Python, FF
 Le script fait tout automatiquement :
 
 1. Verifie que Docker est installe et demarre
-2. Genere un token Claude (ouvre ton navigateur pour te connecter — **une seule fois**)
-3. Sauvegarde le token dans un fichier `.env` (valable 1 an)
-4. Construit l'image Docker (~5-10 min la premiere fois)
-5. Demarre le serveur et ouvre http://localhost:3000
+2. Extrait le token Claude depuis le trousseau macOS (une seule fois, sauvegarde dans `.env`)
+3. Construit l'image Docker (~5-10 min la premiere fois)
+4. Demarre le serveur et ouvre http://localhost:3000
 
 ### Lancements suivants
 
