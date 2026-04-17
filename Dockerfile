@@ -19,14 +19,15 @@ RUN python3 -c "import whisper; whisper.load_model('small')"
 
 # Install Bun (needed for nano-banana)
 RUN curl -fsSL https://bun.sh/install | bash
+ENV BUN_INSTALL="/root/.bun"
 ENV PATH="/root/.bun/bin:$PATH"
 
 # Install nano-banana (AI image generation via Gemini)
 RUN git clone https://github.com/kingbootoshi/nano-banana-2-skill.git /opt/nano-banana && \
     cd /opt/nano-banana && \
-    /root/.bun/bin/bun install && \
-    mkdir -p /usr/local/bin && \
-    ln -sf /opt/nano-banana/src/cli.ts /usr/local/bin/nano-banana
+    bun install && \
+    printf '#!/bin/bash\nBUN=$(command -v bun || echo "$HOME/.bun/bin/bun")\nexec "$BUN" run /opt/nano-banana/src/cli.ts "$@"\n' > /usr/local/bin/nano-banana && \
+    chmod +x /usr/local/bin/nano-banana
 
 # Claude CLI (auth tokens via env var)
 RUN npm install -g @anthropic-ai/claude-code
@@ -53,11 +54,12 @@ RUN npm prune --production
 # Create jobs directory and set ownership
 RUN mkdir -p /app/jobs && chown -R appuser:appuser /app
 
-# Copy Whisper model cache + bun + nano-banana to appuser
+# Copy Whisper model cache + bun to appuser home
 RUN cp -r /root/.cache /home/appuser/.cache 2>/dev/null; \
     cp -r /root/.bun /home/appuser/.bun 2>/dev/null; \
     mkdir -p /home/appuser/.nano-banana && \
-    chown -R appuser:appuser /home/appuser
+    chown -R appuser:appuser /home/appuser && \
+    chown -R appuser:appuser /opt/nano-banana
 
 # Switch to non-root user
 USER appuser
@@ -67,7 +69,7 @@ ENV FFMPEG_PATH=ffmpeg
 ENV FONTS_DIR=/app/pipeline/fonts
 ENV NODE_ENV=production
 ENV HOME=/home/appuser
-ENV PATH="/home/appuser/.bun/bin:/opt/nano-banana/src:$PATH"
+ENV PATH="/home/appuser/.bun/bin:/usr/local/bin:$PATH"
 
 EXPOSE 3000
 
