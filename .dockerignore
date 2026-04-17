@@ -1,0 +1,12 @@
+node_modules
+.next
+jobs
+.git
+.gitignore
+*.md
+start.command
+start.bat
+start-native.command
+.env
+.env.*
+.DS_Store

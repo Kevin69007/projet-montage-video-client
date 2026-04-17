@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 /**
- * Worker process — runs the Claude agent pipeline independently of Next.js.
- * Spawned as a detached child process by /api/process route.
+ * Worker process — spawns Claude CLI to run video editing pipeline.
+ * Uses the user's Claude subscription (no API key needed).
  *
  * Usage: node worker.mjs <jobId>
  * Reads job params from jobs/<jobId>/params.json
@@ -10,11 +10,10 @@
 
 import fs from "fs";
 import path from "path";
+import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-// Set up environment
 process.chdir(__dirname);
 
 const jobId = process.argv[2];
@@ -25,6 +24,11 @@ if (!jobId) {
 
 const jobDir = path.join(__dirname, "jobs", jobId);
 const statusPath = path.join(jobDir, "status.json");
+const PIPELINE_DIR = path.join(__dirname, "pipeline");
+const SCRIPTS_DIR = path.join(PIPELINE_DIR, "scripts");
+const FONTS_DIR = path.join(PIPELINE_DIR, "fonts");
+
+// --- Status helpers ---
 
 function writeError(message) {
   console.error(`[WORKER ${jobId}] ERROR: ${message}`);
@@ -42,270 +46,111 @@ function writeError(message) {
   }
 }
 
-async function main() {
-  console.log(`[WORKER ${jobId}] Starting...`);
+function updateStatus(updates) {
+  const status = fs.existsSync(statusPath)
+    ? JSON.parse(fs.readFileSync(statusPath, "utf-8"))
+    : { status: "processing", step: "", progress: 0, message: "", outputs: [], log: [] };
+  Object.assign(status, updates);
+  fs.writeFileSync(statusPath, JSON.stringify(status, null, 2));
+}
 
-  // Read job params
-  const paramsPath = path.join(jobDir, "params.json");
-  if (!fs.existsSync(paramsPath)) {
-    writeError(`params.json not found at ${paramsPath}`);
-    process.exit(1);
+function addLog(message) {
+  console.log(`[WORKER ${jobId}] ${message}`);
+  const status = fs.existsSync(statusPath)
+    ? JSON.parse(fs.readFileSync(statusPath, "utf-8"))
+    : { log: [] };
+  status.log = [...(status.log || []), `[${new Date().toISOString()}] ${message}`];
+  fs.writeFileSync(statusPath, JSON.stringify(status, null, 2));
+}
+
+// --- Find Claude CLI ---
+
+function findClaude() {
+  const candidates = [
+    "/usr/local/lib/node_modules/.bin/claude",  // npm global (Docker)
+    "/usr/local/bin/claude",                     // npm global symlink
+    path.join(process.env.HOME || "", ".local", "bin", "claude"),  // Mac/Linux local
+    "/opt/homebrew/bin/claude",                  // Homebrew Mac
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
   }
+  // Fallback: hope it's in PATH
+  return "claude";
+}
 
-  const params = JSON.parse(fs.readFileSync(paramsPath, "utf-8"));
-  console.log(`[WORKER ${jobId}] Params loaded: prompt=${params.prompt.slice(0, 50)}..., style=${params.style}, files=${params.fileNames.join(", ")}`);
+// --- Find ffmpeg-full (with libass for subtitle burning) ---
 
-  // Dynamic import of the agent (TypeScript compiled by Next.js)
-  // We need to use the compiled version from .next or re-implement
-  // Since worker.mjs runs outside Next.js, we use the Anthropic SDK directly
-
-  const Anthropic = (await import("@anthropic-ai/sdk")).default;
-
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    writeError("ANTHROPIC_API_KEY is not set");
-    process.exit(1);
+function findFfmpegFull() {
+  const candidates = [
+    process.env.FFMPEG_PATH,
+    "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
+    "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
+  ].filter(Boolean);
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
   }
-  console.log(`[WORKER ${jobId}] API key found (${apiKey.slice(0, 10)}...)`);
+  return "ffmpeg"; // fallback to standard ffmpeg
+}
 
-  const client = new Anthropic({ apiKey, timeout: 120000 });
+// --- Build system prompt ---
 
-  // Import tool handlers — these are TypeScript, so we inline the logic
-  const { execSync } = await import("child_process");
+function buildSystemPrompt(ffmpegPath) {
+  const stylesJson = fs.readFileSync(path.join(PIPELINE_DIR, "styles.json"), "utf-8");
 
-  const PIPELINE_DIR = path.join(__dirname, "pipeline");
-  const SCRIPTS_DIR = path.join(PIPELINE_DIR, "scripts");
-  const FONTS_DIR = path.join(PIPELINE_DIR, "fonts");
-
-  function exec(cmd, timeoutMs = 1800000) {
-    console.log(`[WORKER ${jobId}] exec: ${cmd.slice(0, 200)}`);
-    try {
-      return execSync(cmd, {
-        encoding: "utf-8",
-        timeout: timeoutMs,
-        maxBuffer: 50 * 1024 * 1024,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          FFMPEG_PATH: process.env.FFMPEG_PATH || "ffmpeg",
-          FONTS_DIR: FONTS_DIR,
-        },
-      }).trim();
-    } catch (err) {
-      const stderr = (err.stderr || "").trim();
-      const lastLines = stderr.split("\n").filter(l => !l.includes("MiB/s") && !l.includes("iB/s") && l.trim()).slice(-5).join("\n");
-      throw new Error(lastLines || err.message || "Unknown error");
-    }
-  }
-
-  // Tool handlers
-  async function handleToolCall(name, input) {
-    const workDir = path.join(jobDir, "work");
-    fs.mkdirSync(workDir, { recursive: true });
-
-    console.log(`[WORKER ${jobId}] Tool: ${name}(${JSON.stringify(input).slice(0, 200)})`);
-
-    switch (name) {
-      case "transcribe_video": {
-        const videoPath = input.video_path;
-        const language = input.language || "fr";
-        const outputPath = path.join(workDir, `transcription_${Date.now()}.json`);
-
-        const elevenLabsKey = process.env.ELEVENLABS_API_KEY;
-        if (!elevenLabsKey) {
-          return { success: false, result: "", error: "ELEVENLABS_API_KEY is not set" };
-        }
-
-        // Extract audio for upload
-        const audioPath = path.join(workDir, `audio_${Date.now()}.mp3`);
-        console.log(`[WORKER ${jobId}] Extracting audio...`);
-        exec(`ffmpeg -y -i "${videoPath}" -vn -ac 1 -ar 16000 -b:a 64k -f mp3 "${audioPath}"`, 300000);
-
-        // Call ElevenLabs Speech-to-Text API
-        console.log(`[WORKER ${jobId}] Calling ElevenLabs STT API...`);
-        const audioBuffer = fs.readFileSync(audioPath);
-        const audioBlob = new Blob([audioBuffer], { type: "audio/mpeg" });
-
-        const formData = new FormData();
-        formData.append("file", audioBlob, "audio.mp3");
-        formData.append("model_id", "scribe_v1");
-        formData.append("language_code", language === "fr" ? "fra" : language === "en" ? "eng" : language);
-
-        const res = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
-          method: "POST",
-          headers: { "xi-api-key": elevenLabsKey },
-          body: formData,
-        });
-
-        if (!res.ok) {
-          const errText = await res.text();
-          return { success: false, result: "", error: `ElevenLabs API error ${res.status}: ${errText.slice(0, 300)}` };
-        }
-
-        const data = await res.json();
-        console.log(`[WORKER ${jobId}] ElevenLabs STT response received`);
-
-        // Extract word-level timestamps from ElevenLabs response
-        // Response format: { words: [{text, start, end, type}, ...] } or nested in alignment
-        let words = [];
-        if (data.words && Array.isArray(data.words)) {
-          words = data.words
-            .filter(w => w.type === "word" || !w.type)
-            .map(w => ({
-              word: (w.text || w.word || "").trim(),
-              start: w.start,
-              end: w.end,
-            }));
-        } else if (data.alignment && data.alignment.words) {
-          words = data.alignment.words.map(w => ({
-            word: (w.text || w.word || "").trim(),
-            start: w.start,
-            end: w.end,
-          }));
-        }
-
-        console.log(`[WORKER ${jobId}] Extracted ${words.length} words`);
-
-        fs.writeFileSync(outputPath, JSON.stringify(words, null, 2));
-
-        // Clean up audio file
-        try { fs.unlinkSync(audioPath); } catch (_) {}
-
-        return { success: true, result: `Transcription saved to ${outputPath}. Found ${words.length} words. First 5: ${JSON.stringify(words.slice(0, 5))}` };
-      }
-      case "cut_video": {
-        const segments = input.segments;
-        if (!segments || segments.length === 0) return { success: false, result: "", error: "No segments provided" };
-        const aspectRatio = input.aspect_ratio || null; // e.g. "9:16", "1:1", "16:9"
-        const inputs = segments.map(s => `-ss ${s.start} -to ${s.end} -i "${input.input_path}"`).join(" ");
-        const filterParts = segments.map((_, i) => `[${i}:v]setpts=PTS-STARTPTS[v${i}];[${i}:a]asetpts=PTS-STARTPTS[a${i}]`).join(";");
-        const concatInputs = segments.map((_, i) => `[v${i}][a${i}]`).join("");
-        let postFilter = "";
-        if (aspectRatio === "9:16") {
-          // Crop center to 9:16, then scale to 1080x1920
-          postFilter = `;[outv]crop=ih*9/16:ih[cropped];[cropped]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[outv2]`;
-        } else if (aspectRatio === "1:1") {
-          postFilter = `;[outv]crop=min(iw\\,ih):min(iw\\,ih)[cropped];[cropped]scale=1080:1080[outv2]`;
-        }
-        const outVLabel = postFilter ? "outv2" : "outv";
-        const filterComplex = `${filterParts};${concatInputs}concat=n=${segments.length}:v=1:a=1[outv][outa]${postFilter}`;
-        const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
-        exec(`${ffmpeg} -y ${inputs} -filter_complex "${filterComplex}" -map "[${outVLabel}]" -map "[outa]" -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2 "${input.output_path}"`, 600000);
-        return { success: true, result: `Video cut into ${segments.length} segments${aspectRatio ? ` (${aspectRatio})` : ""} → ${input.output_path}` };
-      }
-      case "burn_subtitles": {
-        const style = input.style || "hormozi";
-        const script = style === "cove" ? "burn_subtitles_cove.py" : "burn_subtitles.py";
-
-        // Load style config from styles.json
-        const stylesPath = path.join(PIPELINE_DIR, "styles.json");
-        let styleConfig = {};
-        try {
-          const styles = JSON.parse(fs.readFileSync(stylesPath, "utf-8"));
-          styleConfig = styles[style] || styles["hormozi"] || {};
-        } catch (_) { /* use defaults */ }
-
-        // Use style config values, with input overrides
-        const accentColor = input.accent_color || styleConfig.accentColor || "#6C2BD9";
-        const fontSize = input.font_size || styleConfig.size || 90;
-        const wpl = input.words_per_line || styleConfig.wordsPerLine || 3;
-        const maxLines = input.max_lines || 2;
-
-        console.log(`[WORKER ${jobId}] Subtitles: style=${style}, accent=${accentColor}, size=${fontSize}, wpl=${wpl}`);
-        exec(`python3 "${SCRIPTS_DIR}/${script}" "${input.video_path}" "${input.transcription_path}" "${accentColor}" "${input.output_path}" ${fontSize} ${wpl} ${maxLines}`, 600000);
-        return { success: true, result: `Subtitles (${style}, accent=${accentColor}, size=${fontSize}) burned → ${input.output_path}` };
-      }
-      case "generate_text_frame": {
-        const linesStr = input.lines.join("|");
-        const accentColor = input.accent_color || "#EB3223";
-        const fontSize = input.font_size || 100;
-        exec(`python3 "${SCRIPTS_DIR}/generate_text_frame.py" "${linesStr}" ${input.punchline_index} "${input.output_path}" "${accentColor}" ${fontSize}`, 120000);
-        return { success: true, result: `Text frame → ${input.output_path}` };
-      }
-      case "concat_videos": {
-        const videoPaths = input.video_paths;
-        if (!videoPaths || videoPaths.length === 0) return { success: false, result: "", error: "No videos provided" };
-        if (videoPaths.length === 1) { fs.copyFileSync(videoPaths[0], input.output_path); return { success: true, result: `Copied → ${input.output_path}` }; }
-        const vinputs = videoPaths.map(p => `-i "${p}"`).join(" ");
-        const filterParts = videoPaths.map((_, i) => `[${i}:v]setpts=PTS-STARTPTS[v${i}];[${i}:a]asetpts=PTS-STARTPTS[a${i}]`).join(";");
-        const concatInputs = videoPaths.map((_, i) => `[v${i}][a${i}]`).join("");
-        const filterComplex = `${filterParts};${concatInputs}concat=n=${videoPaths.length}:v=1:a=1[outv][outa]`;
-        const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
-        exec(`${ffmpeg} -y ${vinputs} -filter_complex "${filterComplex}" -map "[outv]" -map "[outa]" -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2 "${input.output_path}"`, 600000);
-        return { success: true, result: `${videoPaths.length} videos concatenated → ${input.output_path}` };
-      }
-      case "extract_frame": {
-        const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
-        exec(`${ffmpeg} -y -ss ${input.timestamp} -i "${input.video_path}" -frames:v 1 "${input.output_path}"`);
-        return { success: true, result: `Frame at ${input.timestamp}s → ${input.output_path}` };
-      }
-      case "get_video_info": {
-        const result = exec(`ffprobe -v quiet -print_format json -show_format -show_streams "${input.video_path}"`);
-        const info = JSON.parse(result);
-        const vs = info.streams?.find(s => s.codec_type === "video");
-        const as_ = info.streams?.find(s => s.codec_type === "audio");
-        return { success: true, result: JSON.stringify({ duration: parseFloat(info.format?.duration || "0"), size_mb: (parseFloat(info.format?.size || "0") / 1024 / 1024).toFixed(1), width: vs?.width, height: vs?.height, fps: vs?.r_frame_rate, video_codec: vs?.codec_name, audio_codec: as_?.codec_name }, null, 2) };
-      }
-      case "remove_silence": {
-        const transcription = JSON.parse(fs.readFileSync(input.transcription_path, "utf-8"));
-        const words = transcription.filter(w => (!w.type || w.type === "word") && (w.word || w.text));
-        if (words.length === 0) return { success: false, result: "", error: "No words found" };
-        const segments = []; let segStart = words[0].start, segEnd = words[0].end;
-        const gapThreshold = input.gap_threshold || 0.5;
-        for (let i = 1; i < words.length; i++) {
-          if (words[i].start - segEnd > gapThreshold) { segments.push({ start: Math.max(0, segStart - 0.1), end: segEnd + 0.3 }); segStart = words[i].start; }
-          segEnd = words[i].end;
-        }
-        segments.push({ start: Math.max(0, segStart - 0.1), end: segEnd + 0.6 });
-        if (segments.length <= 1) { fs.copyFileSync(input.video_path, input.output_path); return { success: true, result: `No silences. Copied → ${input.output_path}` }; }
-        const sinputs = segments.map(s => `-ss ${s.start} -to ${s.end} -i "${input.video_path}"`).join(" ");
-        const filterParts = segments.map((_, i) => `[${i}:v]setpts=PTS-STARTPTS[v${i}];[${i}:a]asetpts=PTS-STARTPTS[a${i}]`).join(";");
-        const concatInputs = segments.map((_, i) => `[v${i}][a${i}]`).join("");
-        const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
-        exec(`${ffmpeg} -y ${sinputs} -filter_complex "${filterParts};${concatInputs}concat=n=${segments.length}:v=1:a=1[outv][outa]" -map "[outv]" -map "[outa]" -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2 "${input.output_path}"`, 600000);
-        return { success: true, result: `Removed ${segments.length - 1} silence gaps → ${input.output_path}` };
-      }
-      case "save_output": {
-        const outputDir = path.join(jobDir, "output");
-        fs.mkdirSync(outputDir, { recursive: true });
-        const fileName = path.basename(input.file_path);
-        const destPath = path.join(outputDir, fileName);
-        if (input.file_path !== destPath) fs.copyFileSync(input.file_path, destPath);
-        const manifestPath = path.join(jobDir, "outputs.json");
-        const outputs = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, "utf-8")) : [];
-        outputs.push({ file: fileName, label: input.label, description: input.description || "" });
-        fs.writeFileSync(manifestPath, JSON.stringify(outputs, null, 2));
-        return { success: true, result: `Output saved: "${input.label}" → ${fileName}` };
-      }
-      default:
-        return { success: false, result: "", error: `Unknown tool: ${name}` };
-    }
-  }
-
-  // Status helpers
-  function updateStatus(updates) {
-    const status = fs.existsSync(statusPath) ? JSON.parse(fs.readFileSync(statusPath, "utf-8")) : { status: "processing", step: "", progress: 0, message: "", outputs: [], log: [] };
-    Object.assign(status, updates);
-    fs.writeFileSync(statusPath, JSON.stringify(status, null, 2));
-  }
-
-  function addLog(message) {
-    console.log(`[WORKER ${jobId}] ${message}`);
-    const status = fs.existsSync(statusPath) ? JSON.parse(fs.readFileSync(statusPath, "utf-8")) : { log: [] };
-    status.log = [...(status.log || []), `[${new Date().toISOString()}] ${message}`];
-    fs.writeFileSync(statusPath, JSON.stringify(status, null, 2));
-  }
-
-  const stepLabels = { get_video_info: "Analyse video", transcribe_video: "Transcription", cut_video: "Decoupe", burn_subtitles: "Sous-titres", generate_text_frame: "Text frame", concat_videos: "Assemblage", extract_frame: "Extraction frame", remove_silence: "Suppression silences", save_output: "Sauvegarde" };
-  const stepProgress = { get_video_info: 10, transcribe_video: 20, cut_video: 40, remove_silence: 50, extract_frame: 55, burn_subtitles: 65, generate_text_frame: 80, concat_videos: 90, save_output: 95 };
-
-  // System prompt
-  const SYSTEM_PROMPT = `Tu es un monteur video professionnel specialise dans le contenu social media (Instagram Reels, TikTok, YouTube Shorts). Tu recois des videos brutes et un prompt. Tu produis des videos montees, pretes a publier.
+  return `Tu es un monteur video professionnel specialise dans le contenu social media (Instagram Reels, TikTok, YouTube Shorts). Tu recois des videos brutes et un prompt. Tu produis des videos montees, pretes a publier.
 
 ## MODE AUTONOME
 - Ne pose JAMAIS de questions. L'utilisateur ne peut pas repondre.
 - Fais les meilleurs choix editoriaux et execute. Adapte-toi au contenu disponible.
-- TOUJOURS produire au moins un fichier. Ne JAMAIS terminer sans appeler save_output.
+- TOUJOURS produire au moins un fichier. Ne JAMAIS terminer sans sauvegarder les outputs.
+
+## OUTILS DISPONIBLES
+Tu utilises UNIQUEMENT l'outil Bash pour executer des commandes. Voici les scripts et commandes disponibles :
+
+### 1. Transcription (Whisper local)
+\`\`\`bash
+python3 "${SCRIPTS_DIR}/transcribe.py" --video <chemin_video> --output <chemin_sortie.json> --language <fr|en>
+\`\`\`
+- Produit un JSON : [{id, type:"word", word, start, end}, {id, type:"silence", start, end, duration}, ...]
+- Utilise le modele Whisper "small". Premier lancement telecharge le modele (~500MB).
+- IMPORTANT : la transcription peut prendre 1-3 minutes par minute de video.
+
+### 2. Sous-titres — Hormozi style (et variantes)
+\`\`\`bash
+FFMPEG_PATH="${ffmpegPath}" FONTS_DIR="${FONTS_DIR}" python3 "${SCRIPTS_DIR}/burn_subtitles.py" <video> <transcription.json> <accent_hex> <output> [font_size] [wpl] [lines]
+\`\`\`
+- Pour le style Cove (dual-font) :
+\`\`\`bash
+FFMPEG_PATH="${ffmpegPath}" FONTS_DIR="${FONTS_DIR}" python3 "${SCRIPTS_DIR}/burn_subtitles_cove.py" <video> <transcription.json> <output> [accent_hex] [font_size] [wpl] [lines]
+\`\`\`
+
+### 3. Text frame (ecran de fin)
+\`\`\`bash
+FFMPEG_PATH="${ffmpegPath}" FONTS_DIR="${FONTS_DIR}" python3 "${SCRIPTS_DIR}/generate_text_frame.py" "LIGNE1|LIGNE2|PUNCHLINE" <punchline_index> <output.mp4> [accent_color] [font_size]
+\`\`\`
+
+### 4. FFmpeg direct
+- Decoupe : utiliser TOUJOURS le concat FILTER (jamais -f concat demuxer)
+- Commande de coupe type :
+\`\`\`bash
+ffmpeg -y -ss <start1> -to <end1> -i "<video>" -ss <start2> -to <end2> -i "<video>" \\
+  -filter_complex "[0:v]setpts=PTS-STARTPTS[v0];[0:a]asetpts=PTS-STARTPTS[a0];[1:v]setpts=PTS-STARTPTS[v1];[1:a]asetpts=PTS-STARTPTS[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]" \\
+  -map "[outv]" -map "[outa]" -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2 "<output>"
+\`\`\`
+- Conversion 9:16 (vertical) : ajouter apres concat : \`;[outv]crop=ih*9/16:ih[cropped];[cropped]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[outv2]\` et mapper [outv2]
+- Conversion 1:1 : \`;[outv]crop=min(iw\\,ih):min(iw\\,ih)[cropped];[cropped]scale=1080:1080[outv2]\`
+- Info video : \`ffprobe -v quiet -print_format json -show_format -show_streams "<video>"\`
+
+### 5. Extraction de frame
+\`\`\`bash
+ffmpeg -y -ss <timestamp> -i "<video>" -frames:v 1 "<output.jpg>"
+\`\`\`
+
+## STYLES DE SOUS-TITRES DISPONIBLES
+${stylesJson}
+
+Pour chaque style, utilise les parametres correspondants (accentColor, size, wordsPerLine) lors de l'appel a burn_subtitles.py.
 
 ## METHODE DE TRAVAIL
 
@@ -318,16 +163,9 @@ Apres transcription, ANALYSE le contenu en profondeur :
 
 ### Etape 2 — Planifier les cuts intelligemment
 Pour un TEASER ou REEL :
-- **Hook** (0-3s) : La phrase la plus accrocheuse de TOUTE la video. Pas forcement le debut. Cherche une question intrigante, une affirmation choc, un moment emotionnel.
-- **Corps** (3s-fin-5s) : Les 2-3 meilleurs moments qui donnent envie d'en voir plus. Pas chronologique — selectionne par IMPACT.
-- **Fin PROPRE** : TOUJOURS couper sur une phrase COMPLETE. Jamais au milieu d'un mot ou d'une phrase. La derniere phrase doit etre une punchline, une conclusion, ou un cliffhanger ("et c'est la que tout a change..."). Si la phrase fini naturellement, ajoute 0.7-1.0s de marge.
-
-### Etape 3 — Construire la structure
-Pour chaque video a produire :
-1. Identifier les segments par timestamp (debut mot, fin mot + marge)
-2. Verifier que chaque segment commence et finit sur des phrases COMPLETES
-3. Verifier que le dernier segment a une fin satisfaisante (pas coupe en plein milieu)
-4. Si aucune bonne fin n'existe dans la duree cible, etendre legerement OU couper plus tot sur une phrase complete
+- **Hook** (0-3s) : La phrase la plus accrocheuse de TOUTE la video. Pas forcement le debut.
+- **Corps** (3s-fin-5s) : Les 2-3 meilleurs moments qui donnent envie d'en voir plus. Par IMPACT, pas chronologique.
+- **Fin PROPRE** : TOUJOURS couper sur une phrase COMPLETE. Jamais au milieu d'un mot. La derniere phrase doit etre une punchline ou un cliffhanger. Marge 0.7-1.0s apres dernier mot.
 
 ## REGLES DE COUPE
 
@@ -335,7 +173,6 @@ Pour chaque video a produire :
 - Debut segment : 0.1s avant le premier mot
 - Fin segment : 0.5-0.6s apres le dernier mot
 - Fin suivie de silence/text frame : 0.7-1.0s minimum
-- Le son doit s'eteindre naturellement, jamais coupe sec
 
 ### Rythme Reels
 - Entre segments : max 0.2-0.3s de silence
@@ -343,19 +180,25 @@ Pour chaque video a produire :
 - Ne JAMAIS couper au milieu d'un mot
 
 ### Phrases completes — CRITIQUE
-- Chaque segment DOIT commencer au debut d'une phrase
-- Chaque segment DOIT finir a la fin d'une phrase (apres le point, la question, ou une pause naturelle > 0.5s)
-- Si le speaker est en train de parler a la fin du segment : ETENDRE jusqu'a la fin de la phrase OU RACCOURCIR au segment precedent
+- Chaque segment DOIT commencer et finir sur une phrase complete
+- Si le speaker parle encore a la fin du segment : ETENDRE ou RACCOURCIR
 
 ## ASSEMBLAGE
-- TOUJOURS utiliser cut_video (concat filter). JAMAIS concat demuxer.
+- TOUJOURS utiliser le concat filter FFmpeg. JAMAIS le concat demuxer (-f concat).
 - Qualite : -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2
 
-## SOUS-TITRES
-- Style par defaut : Hormozi (word highlight karaoke)
-- Font : Big Shoulders Display Black, 90px, MAJUSCULES
-- Mot actif : couleur accent + scale 110%
-- Couleur accent : extraire automatiquement une couleur saturee du decor video (frame ~3s)
+## SOUS-TITRES — SYNCHRONISATION CRITIQUE
+- Pipeline correct :
+  1. Transcrire la video ORIGINALE (pour analyser et choisir les segments)
+  2. Couper la video (ffmpeg concat filter)
+  3. RE-TRANSCRIRE la video COUPEE (nouveau appel a transcribe.py sur le fichier coupe)
+  4. Bruler les sous-titres sur la video coupee avec la NOUVELLE transcription
+- Ne JAMAIS utiliser la transcription de l'original sur la video coupee.
+
+## DUREE — REGLE STRICTE
+- Si une duree cible est specifiee, la video finale DOIT respecter cette duree (+/- 3 secondes max).
+- AVANT de couper, CALCULE la duree totale : somme de (end - start) de chaque segment.
+- Si la somme depasse la duree cible, RETIRE des segments ou RACCOURCIS-les.
 
 ## TEXT FRAME (ecran de fin)
 - Fond noir 1080x1920, 4s, 30fps
@@ -366,221 +209,341 @@ Pour chaque video a produire :
 Pour chaque video produite, generer une description Instagram :
 - Texte percutant en phase avec le contenu
 - Emojis en fin de paragraphe
-- Terminer par "Tu te reconnais ? 👇"
+- Terminer par "Tu te reconnais ?"
 - 10 hashtags thematiques
 
 ## TYPES DE MONTAGE
 
 ### Teaser / Reel (20-60s)
-- Selectionner les 2-4 meilleurs moments de la video source
-- Commencer par le HOOK le plus fort (pas forcement chronologique)
-- Finir sur une punchline ou un cliffhanger
-- Supprimer tous les silences et hesitations
-- Pour Instagram/TikTok : TOUJOURS utiliser aspect_ratio "9:16" dans cut_video (vertical, 1080x1920)
-- Si la source est 16:9 (horizontale), cut_video avec aspect_ratio "9:16" crop automatiquement au centre
+- Selectionner les 2-4 meilleurs moments
+- Commencer par le HOOK le plus fort
+- Format vertical : utiliser crop 9:16 dans la commande ffmpeg
+- Supprimer silences et hesitations
 
 ### Version longue nettoyee
 - Garder l'integralite du contenu
 - Supprimer faux departs, doublons, silences morts
-- Garder le rythme naturel mais serre
 
 ### Multi-reels (extraire N clips)
 - Identifier N passages thematiques distincts
-- Chaque clip a son propre hook + conclusion
+- Chaque clip a son hook + conclusion
 - Chaque clip fonctionne independamment
 
-## DUREE — REGLE STRICTE
-- Si une duree cible est specifiee, la video finale DOIT respecter cette duree (+/- 3 secondes max).
-- AVANT d'appeler cut_video, CALCULE la duree totale : somme de (end - start) de chaque segment.
-- Si la somme depasse la duree cible, RETIRE des segments ou RACCOURCIS-les.
-- Exemple : duree cible 30s, segments = [(0,12), (45,58), (90,105)] → total = 12+13+15 = 40s → TROP LONG → retirer un segment.
+## METHODE DE DECOUPE AVANCEE
+1. Transcrire chaque clip source (word_timestamps via transcribe.py)
+2. Analyser : faux departs, doublons, meilleure prise
+3. Couper serre avec marges (concat filter multi-input)
+4. Scanner gaps > 0.5s entre mots — les supprimer via nouveau cut
+5. Verifier : segment >5s sans silence = probablement correct ; >2x duree attendue = doublon probable
 
-## SOUS-TITRES — SYNCHRONISATION
-- CRITIQUE : les sous-titres doivent etre synchronises avec l'audio de la video FINALE.
-- Pipeline correct :
-  1. Transcrire la video ORIGINALE (pour analyser et choisir les segments)
-  2. Couper la video (cut_video)
-  3. RE-TRANSCRIRE la video COUPEE (nouveau appel a transcribe_video sur le fichier coupe)
-  4. Bruler les sous-titres sur la video coupee avec la NOUVELLE transcription
-- Ne JAMAIS utiliser la transcription de l'original sur la video coupee.
+## PIPELINE COMPLET
+1. ffprobe — analyser le fichier source
+2. transcribe.py — transcrire l'original (pour analyse)
+3. ANALYSER la transcription (dans ta reflexion)
+4. ffmpeg concat filter — decouper les segments identifies
+5. transcribe.py — RE-TRANSCRIRE la video coupee (pour sync sous-titres)
+6. burn_subtitles.py — ajouter sous-titres avec la nouvelle transcription
+7. generate_text_frame.py — creer l'ecran de fin (optionnel)
+8. ffmpeg concat filter — assembler video + text frame (si genere)
+9. SAUVEGARDER chaque fichier final (voir section SAUVEGARDE)
 
-## PIPELINE
-1. get_video_info — analyser le fichier source
-2. transcribe_video — transcrire l'original (pour analyse)
-3. ANALYSER la transcription (dans ta reflexion, pas un outil)
-4. cut_video — decouper les segments identifies (avec aspect_ratio si demande)
-5. transcribe_video — RE-TRANSCRIRE la video coupee (pour sync sous-titres)
-6. burn_subtitles — ajouter les sous-titres avec la nouvelle transcription
-7. generate_text_frame — creer l'ecran de fin (optionnel)
-8. concat_videos — assembler video + text frame (si text frame genere)
-9. save_output — enregistrer chaque delivrable
+## SAUVEGARDE DES OUTPUTS — OBLIGATOIRE
+Pour CHAQUE delivrable produit :
+1. Copier le fichier final dans le repertoire output :
+   \`cp "<fichier_final>" "<output_dir>/"\`
+2. Ecrire le manifeste outputs.json (ECRASER le fichier a chaque fois avec la liste complete) :
+   Le fichier doit contenir un tableau JSON :
+   \`\`\`json
+   [
+     {"file": "nom_fichier.mp4", "label": "Teaser 30s", "description": "Description Instagram..."},
+     {"file": "miniature.jpg", "label": "Miniature", "description": ""}
+   ]
+   \`\`\`
+   Ecris ce fichier avec : \`cat > "<outputs_json_path>" << 'MANIFEST_EOF'\n[...contenu...]\nMANIFEST_EOF\`
 
-## METHODE DE DECOUPE AVANCEE (issue des corrections de Kevin)
+Tu peux produire PLUSIEURS outputs (2+ videos, miniatures, etc.). Chaque fichier doit avoir son entree dans outputs.json.
+TOUJOURS produire au moins un fichier. Ne JAMAIS terminer sans sauvegarder.
 
-### Workflow decoupe — OBLIGATOIRE
-1. Transcrire chaque clip source (word_timestamps)
-2. Analyser la transcription pour reperer : faux departs (phrase commencee puis reprise), doublons (meme replique dite 2+ fois), silences morts entre prises
-3. Isoler uniquement la meilleure prise complete
-4. Couper serre avec les marges (voir regles de coupe ci-dessus)
-5. Verifier : si la duree d'un segment depasse 2x la duree attendue de la replique = doublon probable, re-analyser
-
-### Checklist pre-cut (a verifier AVANT chaque assemblage)
-- Chaque clip source a ete transcrit avec word_timestamps
-- Les faux departs et doublons ont ete identifies et exclus
-- Les timestamps de cut sont bases sur la transcription, pas sur des estimations
-- La marge de fin est >= 0.5s apres le dernier mot
-- Si un segment est suivi de silence (text frame, noir) : marge de fin >= 0.7s
-- L'assemblage utilise le concat filter (PAS le concat demuxer -f concat)
-
-### Regles de rythme (deduites des corrections de Kevin — format Reels)
-- Entre segments (hook, chute, transition) : max 0.2-0.3s de silence
-- Pauses intra-replique > 1s : les couper (silences de reflexion)
-- Ne jamais couper les mots, uniquement les silences
-- Avant premier mot : 0.1s de marge
-- Apres dernier mot : 0.5s (0.7-1.0s si suivi de silence/text frame)
-- Gap scanning : apres transcription, scanner les gaps > 0.5s entre word.end et next_word.start
-
-### Pipeline complet de production hook
-1. Transcrire clip source
-2. Analyser transcription : faux departs, doublons, identifier meilleure prise
-3. Couper segments (hook + chute + transition) via concat filter multi-input
-4. Supprimer silences : gaps > 0.5s entre mots via concat filter
-5. Extraire couleur accent du decor (frame ~3s)
-6. Bruler sous-titres Hormozi via burn_subtitles (90px, 3wpl, 2 lignes)
-7. Generer text frame video via generate_text_frame
-8. Concat video sous-titree + text frame -> fichier final
-9. Enregistrer avec save_output
-
-### Erreurs a eviter
+## ERREURS A EVITER
 - Ne JAMAIS utiliser les timestamps bruts sans transcrire d'abord
-- Ne JAMAIS prendre un segment >5s sans verifier qu'il ne contient qu'une prise
-- Marge de fin trop courte (0.2-0.3s) = mots coupes. Minimum 0.5s apres le dernier mot
-- Segment avant silence : la marge standard (0.5s) ne suffit pas. Le silence expose la troncature. Utiliser 0.7-1.0s
-
-## FICHIERS
-- Repertoire de travail : fourni dans le message
-- Videos source : dans le dossier input/ du job
-- Appelle save_output pour CHAQUE fichier final avec un label clair et une description Instagram
-- Choisis automatiquement la couleur accent en extrayant une couleur saturee du decor (frame ~3s) si non fournie.
-- TOUJOURS produire au moins un fichier de sortie. Ne JAMAIS terminer sans appeler save_output.`;
-
-  // Tool definitions
-  const TOOLS = [
-    { name: "transcribe_video", description: "Transcribe video with Whisper (word-level timestamps).", input_schema: { type: "object", properties: { video_path: { type: "string" }, language: { type: "string" } }, required: ["video_path"] } },
-    { name: "cut_video", description: "Cut and assemble segments using FFmpeg concat filter. Supports aspect ratio conversion (9:16 for Reels, 1:1 for feed).", input_schema: { type: "object", properties: { input_path: { type: "string" }, segments: { type: "array", items: { type: "object", properties: { start: { type: "number" }, end: { type: "number" } }, required: ["start", "end"] } }, output_path: { type: "string" }, aspect_ratio: { type: "string", description: "Target aspect ratio: '9:16' for Reels/TikTok, '1:1' for Instagram feed. Omit to keep original." } }, required: ["input_path", "segments", "output_path"] } },
-    { name: "burn_subtitles", description: "Burn styled subtitles (Hormozi/Cove).", input_schema: { type: "object", properties: { video_path: { type: "string" }, transcription_path: { type: "string" }, style: { type: "string", enum: ["hormozi", "cove", "mrbeast", "karaoke", "boxed", "minimal", "neon"] }, accent_color: { type: "string" }, output_path: { type: "string" }, font_size: { type: "number" }, words_per_line: { type: "number" }, max_lines: { type: "number" } }, required: ["video_path", "transcription_path", "style", "accent_color", "output_path"] } },
-    { name: "generate_text_frame", description: "Generate animated text frame video (4s, 1080x1920).", input_schema: { type: "object", properties: { lines: { type: "array", items: { type: "string" } }, punchline_index: { type: "number" }, output_path: { type: "string" }, accent_color: { type: "string" }, font_size: { type: "number" } }, required: ["lines", "punchline_index", "output_path"] } },
-    { name: "concat_videos", description: "Concatenate videos using FFmpeg concat filter.", input_schema: { type: "object", properties: { video_paths: { type: "array", items: { type: "string" } }, output_path: { type: "string" } }, required: ["video_paths", "output_path"] } },
-    { name: "extract_frame", description: "Extract a single frame from video.", input_schema: { type: "object", properties: { video_path: { type: "string" }, timestamp: { type: "number" }, output_path: { type: "string" } }, required: ["video_path", "timestamp", "output_path"] } },
-    { name: "get_video_info", description: "Get video metadata.", input_schema: { type: "object", properties: { video_path: { type: "string" } }, required: ["video_path"] } },
-    { name: "remove_silence", description: "Remove silence gaps from video.", input_schema: { type: "object", properties: { video_path: { type: "string" }, transcription_path: { type: "string" }, output_path: { type: "string" }, gap_threshold: { type: "number" } }, required: ["video_path", "transcription_path", "output_path"] } },
-    { name: "save_output", description: "Register a file as final output for download.", input_schema: { type: "object", properties: { file_path: { type: "string" }, label: { type: "string" }, description: { type: "string" } }, required: ["file_path", "label"] } },
-  ];
-
-  // Build user message
-  const inputDir = path.join(jobDir, "input");
-  const videoPaths = params.fileNames.map(f => path.join(inputDir, f));
-  const videoList = videoPaths.map((p, i) => `- Video ${i + 1}: ${p}`).join("\n");
-  const workDir = path.join(jobDir, "work");
-  fs.mkdirSync(workDir, { recursive: true });
-
-  const durationInfo = params.videoType === "teaser" ? `\nDuree cible: ${params.duration} secondes MAXIMUM (STRICT — ne pas depasser)` : "";
-  const formatInfo = params.format && params.format !== "original" ? `\nFormat: ${params.format} (utiliser aspect_ratio "${params.format}" dans cut_video)` : "";
-  const langCode = params.language || "fr";
-
-  const userMessage = `Voici les videos uploadees:
-${videoList}
-
-Repertoire de travail: ${workDir}
-Type de montage: ${params.videoType || "teaser"}${durationInfo}${formatInfo}
-Style sous-titres: ${params.style}
-Langue: ${langCode}${params.accentColor ? `\nCouleur accent: ${params.accentColor}` : ""}
-
-## INSTRUCTIONS IMPORTANTES
-- Type "${params.videoType}": ${params.videoType === "teaser" ? `Produis un teaser/reel de MAXIMUM ${params.duration} secondes. Calcule la duree totale de tes segments AVANT de couper. Si la somme depasse ${params.duration}s, REDUIS le nombre de segments.` : params.videoType === "clean" ? "Nettoie la video complete (supprime silences, faux departs, doublons)." : "Extrais plusieurs clips courts independants avec chacun son hook."}
-- SOUS-TITRES : Apres avoir coupe la video, tu DOIS re-transcrire la VIDEO COUPEE (pas l'originale) avant de bruler les sous-titres. Les timestamps de la transcription originale ne correspondent plus a la video coupee.
-- Utilise la langue "${langCode}" pour la transcription.
-
-## Prompt de l'utilisateur:
-${params.prompt}`;
-
-  updateStatus({ status: "processing", step: "Initialisation", progress: 5, message: "Demarrage du pipeline..." });
-  addLog(`Demarrage avec ${params.fileNames.length} video(s)`);
-
-  const messages = [{ role: "user", content: userMessage }];
-  let iterationCount = 0;
-  const maxIterations = 50;
-
-  while (iterationCount < maxIterations) {
-    iterationCount++;
-    addLog(`Iteration ${iterationCount} — appel Claude API`);
-
-    let response;
-    try {
-      response = await client.messages.create({
-        model: "claude-sonnet-4-6",
-        max_tokens: 8192,
-        system: SYSTEM_PROMPT,
-        tools: TOOLS,
-        messages,
-      });
-    } catch (apiError) {
-      addLog(`ERREUR API Claude: ${apiError.message}`);
-      updateStatus({ status: "error", step: "Erreur", message: `Erreur API: ${apiError.message}` });
-      process.exit(1);
-    }
-
-    addLog(`Reponse: ${response.content.length} blocs, stop=${response.stop_reason}`);
-
-    const assistantContent = response.content;
-    messages.push({ role: "assistant", content: assistantContent });
-
-    const toolUses = assistantContent.filter(b => b.type === "tool_use");
-
-    if (toolUses.length === 0) {
-      const textBlocks = assistantContent.filter(b => b.type === "text");
-      const finalMessage = textBlocks.map(b => b.text).join("\n") || "Montage termine.";
-      const outputsPath = path.join(jobDir, "outputs.json");
-      const outputs = fs.existsSync(outputsPath) ? JSON.parse(fs.readFileSync(outputsPath, "utf-8")) : [];
-      updateStatus({ status: "done", step: "Termine", progress: 100, message: finalMessage, outputs });
-      addLog("Pipeline termine avec succes");
-      console.log(`[WORKER ${jobId}] Done!`);
-      process.exit(0);
-    }
-
-    const toolResults = [];
-    for (const toolUse of toolUses) {
-      const toolName = toolUse.name;
-      const toolInput = toolUse.input;
-      const toolId = toolUse.id;
-
-      updateStatus({ step: stepLabels[toolName] || toolName, message: `Execution: ${toolName}...`, progress: stepProgress[toolName] || 50 });
-
-      let result;
-      try {
-        result = await handleToolCall(toolName, toolInput);
-      } catch (toolError) {
-        result = { success: false, result: "", error: String(toolError?.message || toolError) };
-      }
-
-      addLog(result.success ? `${toolName} OK: ${result.result.slice(0, 200)}` : `${toolName} ERREUR: ${result.error}`);
-
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: toolId,
-        content: result.success ? result.result : `Error: ${result.error}`,
-        is_error: !result.success,
-      });
-    }
-
-    messages.push({ role: "user", content: toolResults });
-  }
-
-  updateStatus({ status: "error", step: "Erreur", message: "Max iterations reached" });
-  process.exit(1);
+- Marge de fin trop courte (0.2-0.3s) = mots coupes. Minimum 0.5s
+- Segment avant silence : utiliser 0.7-1.0s de marge (pas 0.5s)
+- Ne JAMAIS utiliser -f concat (demuxer). Toujours le concat FILTER.`;
 }
 
-main().catch(err => {
+// --- Build user prompt ---
+
+function buildUserPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath) {
+  const videoList = videoPaths.map((p, i) => `- Video ${i + 1}: ${p}`).join("\n");
+  const durationInfo = params.videoType === "teaser"
+    ? `\nDuree cible: ${params.duration} secondes MAXIMUM (STRICT — ne pas depasser de plus de 3s)`
+    : "";
+  const formatInfo = params.format && params.format !== "original"
+    ? `\nFormat: ${params.format} (ajouter crop ${params.format} dans la commande ffmpeg de coupe)`
+    : "";
+
+  // Load style config for the prompt
+  let styleInfo = `Style sous-titres: ${params.style}`;
+  try {
+    const styles = JSON.parse(fs.readFileSync(path.join(PIPELINE_DIR, "styles.json"), "utf-8"));
+    const cfg = styles[params.style];
+    if (cfg) {
+      const accent = params.accentColor || cfg.accentColor;
+      styleInfo += ` (accent: ${accent}, taille: ${cfg.size}px, mots/ligne: ${cfg.wordsPerLine})`;
+    }
+  } catch (_) {}
+
+  return `Voici les videos uploadees :
+${videoList}
+
+Repertoire de travail : ${workDir}
+Repertoire de sortie : ${outputDir}
+Fichier manifeste : ${outputsJsonPath}
+
+Type de montage : ${params.videoType || "teaser"}${durationInfo}${formatInfo}
+${styleInfo}
+Langue : ${params.language || "fr"}${params.accentColor ? `\nCouleur accent : ${params.accentColor}` : ""}
+
+## INSTRUCTIONS
+- Type "${params.videoType}" : ${params.videoType === "teaser" ? `Produis un teaser/reel de MAXIMUM ${params.duration} secondes. Calcule la duree totale AVANT de couper.` : params.videoType === "clean" ? "Nettoie la video complete (supprime silences, faux departs, doublons)." : "Extrais plusieurs clips courts independants avec chacun son hook et sa conclusion."}
+- SOUS-TITRES : Apres avoir coupe la video, tu DOIS re-transcrire la VIDEO COUPEE avant de bruler les sous-titres.
+- SAUVEGARDE : Copie chaque fichier final dans ${outputDir}/ et ecris le manifeste ${outputsJsonPath}
+- Utilise la langue "${params.language || "fr"}" pour la transcription.
+
+## Prompt de l'utilisateur :
+${params.prompt}`;
+}
+
+// --- Progress detection from stream-json ---
+
+function detectProgress(line) {
+  const text = typeof line === "string" ? line : JSON.stringify(line);
+  if (text.includes("transcribe.py")) return { step: "Transcription", progress: 20, message: "Transcription Whisper en cours..." };
+  if (text.includes("ffprobe")) return { step: "Analyse", progress: 10, message: "Analyse du fichier video..." };
+  if (text.includes("ffmpeg") && (text.includes("-ss") || text.includes("concat"))) {
+    if (text.includes("burn_subtitles") || text.includes(".ass")) return null; // subtitle burning, handled below
+    if (text.includes("text_frame") || text.includes("generate_text_frame")) return null; // text frame, handled below
+    return { step: "Decoupe", progress: 40, message: "Decoupe et assemblage des segments..." };
+  }
+  if (text.includes("burn_subtitles")) return { step: "Sous-titres", progress: 65, message: "Application des sous-titres..." };
+  if (text.includes("generate_text_frame")) return { step: "Text frame", progress: 80, message: "Generation de l'ecran de fin..." };
+  if (text.includes("outputs.json") || text.includes("MANIFEST_EOF")) return { step: "Sauvegarde", progress: 95, message: "Sauvegarde des fichiers..." };
+  return null;
+}
+
+// --- Main ---
+
+async function main() {
+  console.log(`[WORKER ${jobId}] Starting...`);
+
+  const paramsPath = path.join(jobDir, "params.json");
+  if (!fs.existsSync(paramsPath)) {
+    writeError(`params.json not found at ${paramsPath}`);
+    process.exit(1);
+  }
+
+  const params = JSON.parse(fs.readFileSync(paramsPath, "utf-8"));
+  console.log(`[WORKER ${jobId}] Params: prompt="${params.prompt.slice(0, 50)}...", style=${params.style}, files=${params.fileNames.join(", ")}`);
+
+  // Set up directories
+  const inputDir = path.join(jobDir, "input");
+  const workDir = path.join(jobDir, "work");
+  const outputDir = path.join(jobDir, "output");
+  const outputsJsonPath = path.join(jobDir, "outputs.json");
+  fs.mkdirSync(workDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  const videoPaths = params.fileNames.map(f => path.join(inputDir, f));
+
+  // Find tools
+  const claudePath = findClaude();
+  const ffmpegPath = findFfmpegFull();
+  console.log(`[WORKER ${jobId}] Claude CLI: ${claudePath}`);
+  console.log(`[WORKER ${jobId}] FFmpeg: ${ffmpegPath}`);
+
+  // Build prompts
+  const systemPrompt = buildSystemPrompt(ffmpegPath);
+  const userPrompt = buildUserPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath);
+
+  // Write prompts to temp files (avoid shell escaping issues)
+  const systemPromptPath = path.join(jobDir, "system_prompt.txt");
+  const userPromptPath = path.join(jobDir, "user_prompt.txt");
+  fs.writeFileSync(systemPromptPath, systemPrompt);
+  fs.writeFileSync(userPromptPath, userPrompt);
+
+  updateStatus({ status: "processing", step: "Initialisation", progress: 5, message: "Demarrage du pipeline Claude..." });
+  addLog(`Demarrage avec ${params.fileNames.length} video(s)`);
+
+  // Spawn Claude CLI
+  const args = [
+    "-p",
+    userPrompt,
+    "--output-format", "stream-json",
+    "--verbose",
+    "--system-prompt", systemPrompt,
+    "--tools", "Bash,Read,Write",
+    "--dangerously-skip-permissions",
+    "--add-dir", jobDir,
+    "--add-dir", PIPELINE_DIR,
+    "--model", "sonnet",
+    "--no-session-persistence",
+  ];
+
+  console.log(`[WORKER ${jobId}] Spawning: ${claudePath} -p ...`);
+
+  const child = spawn(claudePath, args, {
+    cwd: workDir,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      PATH: `${path.join(process.env.HOME || "", ".local", "bin")}:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}`,
+      FFMPEG_PATH: ffmpegPath,
+      FONTS_DIR: FONTS_DIR,
+    },
+  });
+
+  let stderrBuffer = "";
+  let lastProgress = 5;
+
+  // Parse stream-json from stdout
+  let stdoutBuffer = "";
+  child.stdout.on("data", (chunk) => {
+    stdoutBuffer += chunk.toString();
+    const lines = stdoutBuffer.split("\n");
+    stdoutBuffer = lines.pop() || ""; // keep incomplete line in buffer
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      try {
+        const event = JSON.parse(line);
+
+        // Log assistant messages
+        if (event.type === "assistant" && event.message?.content) {
+          for (const block of event.message.content) {
+            if (block.type === "tool_use" && block.name === "Bash") {
+              const cmd = block.input?.command || "";
+              const shortCmd = cmd.length > 150 ? cmd.slice(0, 150) + "..." : cmd;
+              addLog(`Bash: ${shortCmd}`);
+
+              // Detect progress from command
+              const progress = detectProgress(cmd);
+              if (progress && progress.progress > lastProgress) {
+                lastProgress = progress.progress;
+                updateStatus(progress);
+              }
+            } else if (block.type === "tool_use") {
+              addLog(`${block.name}: ${JSON.stringify(block.input || {}).slice(0, 150)}`);
+            } else if (block.type === "text" && block.text) {
+              const text = block.text.trim();
+              if (text) addLog(`Claude: ${text.slice(0, 300)}`);
+            }
+          }
+        }
+
+        // Check for errors
+        if (event.type === "assistant" && event.error) {
+          addLog(`Erreur Claude: ${event.error}`);
+          if (event.error === "authentication_failed") {
+            writeError("Claude CLI non connecte. Lance 'claude login' dans le terminal.");
+            process.exit(1);
+          }
+        }
+
+        // Check for result (final event)
+        if (event.type === "result") {
+          if (event.is_error) {
+            addLog(`Pipeline termine avec erreur: ${event.result?.slice(0, 300) || "unknown"}`);
+          } else {
+            addLog(`Pipeline Claude termine (${event.num_turns} tours, ${event.duration_ms}ms)`);
+          }
+        }
+      } catch (_) {
+        // Non-JSON line, skip
+      }
+    }
+  });
+
+  child.stderr.on("data", (chunk) => {
+    stderrBuffer += chunk.toString();
+  });
+
+  // Wait for process to exit
+  const exitCode = await new Promise((resolve) => {
+    child.on("close", (code) => resolve(code));
+    child.on("error", (err) => {
+      addLog(`Erreur spawn: ${err.message}`);
+      resolve(1);
+    });
+  });
+
+  console.log(`[WORKER ${jobId}] Claude CLI exited with code ${exitCode}`);
+
+  if (stderrBuffer.trim()) {
+    const lastStderr = stderrBuffer.trim().split("\n").slice(-5).join("\n");
+    console.error(`[WORKER ${jobId}] stderr: ${lastStderr}`);
+  }
+
+  // Collect outputs
+  let outputs = [];
+
+  // Try reading outputs.json written by Claude
+  if (fs.existsSync(outputsJsonPath)) {
+    try {
+      outputs = JSON.parse(fs.readFileSync(outputsJsonPath, "utf-8"));
+      if (!Array.isArray(outputs)) outputs = [outputs];
+      addLog(`Manifeste trouve: ${outputs.length} fichier(s)`);
+    } catch (e) {
+      addLog(`Erreur lecture outputs.json: ${e.message}`);
+    }
+  }
+
+  // Fallback: scan output directory for video files
+  if (outputs.length === 0 && fs.existsSync(outputDir)) {
+    const files = fs.readdirSync(outputDir).filter(f =>
+      /\.(mp4|mov|avi|mkv|webm|jpg|jpeg|png)$/i.test(f)
+    );
+    if (files.length > 0) {
+      outputs = files.map(f => ({
+        file: f,
+        label: f.replace(/\.[^.]+$/, "").replace(/[_-]/g, " "),
+        description: "",
+      }));
+      // Write manifest for consistency
+      fs.writeFileSync(outputsJsonPath, JSON.stringify(outputs, null, 2));
+      addLog(`Fallback: ${files.length} fichier(s) trouves dans output/`);
+    }
+  }
+
+  // Final status
+  if (outputs.length > 0) {
+    updateStatus({
+      status: "done",
+      step: "Termine",
+      progress: 100,
+      message: `${outputs.length} fichier(s) produit(s)`,
+      outputs,
+    });
+    addLog("Pipeline termine avec succes");
+    console.log(`[WORKER ${jobId}] Done! ${outputs.length} output(s)`);
+    process.exit(0);
+  } else {
+    const errorMsg = exitCode !== 0
+      ? `Claude CLI a quitte avec le code ${exitCode}. Verifiez que Claude est connecte (claude login).`
+      : "Aucun fichier produit. Le pipeline n'a pas genere de sortie.";
+    updateStatus({
+      status: "error",
+      step: "Erreur",
+      progress: 100,
+      message: errorMsg,
+      outputs: [],
+    });
+    addLog(`Echec: ${errorMsg}`);
+    process.exit(1);
+  }
+}
+
+main().catch((err) => {
   writeError(err.message || "Unknown fatal error");
   console.error(`[WORKER ${jobId}] Fatal:`, err);
   process.exit(1);

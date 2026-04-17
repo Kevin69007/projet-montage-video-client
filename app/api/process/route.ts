@@ -4,6 +4,19 @@ import * as path from "path";
 
 export const runtime = "nodejs";
 
+function findClaude(): string | null {
+  const home = process.env.HOME || "";
+  const candidates = [
+    path.join(home, ".local", "bin", "claude"),
+    "/usr/local/bin/claude",
+    "/opt/homebrew/bin/claude",
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -16,7 +29,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const jobDir = path.join(process.cwd(), "jobs", jobId);
+    // Check Claude CLI is available
+    const claudePath = findClaude();
+    if (!claudePath) {
+      return NextResponse.json(
+        { error: "Claude CLI non trouve. Installe-le et lance 'claude login'. Voir INSTALL.md" },
+        { status: 500 }
+      );
+    }
+
+    const jobDir = path.join(/*turbopackIgnore: true*/ process.cwd(), "jobs", jobId);
     const inputDir = path.join(jobDir, "input");
 
     if (!fs.existsSync(inputDir)) {
@@ -48,9 +70,8 @@ export async function POST(request: NextRequest) {
     );
 
     // Spawn worker as a detached shell command
-    // Use shell string to avoid Turbopack resolving the file path as a module
     const { spawn } = await import("child_process");
-    const cmd = ["node", path.join(process.cwd(), "worker.mjs"), jobId].join(" ");
+    const cmd = ["node", path.join(/*turbopackIgnore: true*/ process.cwd(), "worker.mjs"), jobId].join(" ");
 
     console.log(`[PROCESS] Spawning: ${cmd}`);
 
