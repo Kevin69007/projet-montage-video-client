@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { jobId, prompt, style, accentColor } = body;
+    const { jobId, prompt, style, accentColor, videoType, duration, format, language } = body;
 
     if (!jobId || !prompt) {
       return NextResponse.json(
@@ -39,6 +39,10 @@ export async function POST(request: NextRequest) {
         prompt,
         style: style || "hormozi",
         accentColor: accentColor || "",
+        videoType: videoType || "teaser",
+        duration: duration || 30,
+        format: format || "9:16",
+        language: language || "fr",
         fileNames,
       })
     );

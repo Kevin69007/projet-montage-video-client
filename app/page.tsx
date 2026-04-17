@@ -13,6 +13,10 @@ export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [style, setStyle] = useState("hormozi");
   const [accentColor, setAccentColor] = useState("");
+  const [videoType, setVideoType] = useState("teaser");
+  const [duration, setDuration] = useState(30);
+  const [format, setFormat] = useState("9:16");
+  const [language, setLanguage] = useState("fr");
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadPhase, setUploadPhase] = useState<"idle" | "uploading" | "starting">("idle");
@@ -46,6 +50,10 @@ export default function Home() {
         prompt,
         style,
         accentColor: accentColor || undefined,
+        videoType,
+        duration,
+        format,
+        language,
       });
       router.push(`/job/${jobId}`);
     } catch (err: unknown) {
@@ -73,6 +81,63 @@ export default function Home() {
         <UploadZone files={files} onFilesChange={setFiles} />
         <PromptInput value={prompt} onChange={setPrompt} />
         <StyleSelector value={style} onChange={setStyle} />
+
+        {/* Video type, duration, format, language */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div>
+            <label className="mono-label block mb-2">Type</label>
+            <select
+              value={videoType}
+              onChange={(e) => setVideoType(e.target.value)}
+              className="glass-input w-full"
+            >
+              <option value="teaser">Teaser / Reel</option>
+              <option value="clean">Version longue</option>
+              <option value="multi">Multi-reels</option>
+            </select>
+          </div>
+
+          {videoType === "teaser" && (
+            <div>
+              <label className="mono-label block mb-2">Duree (s)</label>
+              <input
+                type="number"
+                value={duration}
+                onChange={(e) => setDuration(Math.max(5, Math.min(300, parseInt(e.target.value) || 30)))}
+                min={5}
+                max={300}
+                className="glass-input w-full"
+              />
+            </div>
+          )}
+
+          <div>
+            <label className="mono-label block mb-2">Format</label>
+            <select
+              value={format}
+              onChange={(e) => setFormat(e.target.value)}
+              className="glass-input w-full"
+            >
+              <option value="9:16">9:16 Vertical</option>
+              <option value="16:9">16:9 Horizontal</option>
+              <option value="1:1">1:1 Carre</option>
+              <option value="original">Original</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="mono-label block mb-2">Langue</label>
+            <select
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              className="glass-input w-full"
+            >
+              <option value="fr">Francais</option>
+              <option value="en">English</option>
+              <option value="auto">Auto-detect</option>
+            </select>
+          </div>
+        </div>
 
         {/* Accent color (optional) */}
         <div>

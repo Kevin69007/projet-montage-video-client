@@ -50,6 +50,10 @@ export async function startProcessing(params: {
   prompt: string;
   style: string;
   accentColor?: string;
+  videoType: string;
+  duration: number;
+  format: string;
+  language: string;
 }): Promise<{ ok: boolean }> {
   const res = await fetch(`${API_BASE}/api/process`, {
     method: "POST",

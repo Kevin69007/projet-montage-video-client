@@ -377,15 +377,30 @@ Pour chaque video produite, generer une description Instagram :
 - Chaque clip a son propre hook + conclusion
 - Chaque clip fonctionne independamment
 
+## DUREE — REGLE STRICTE
+- Si une duree cible est specifiee, la video finale DOIT respecter cette duree (+/- 3 secondes max).
+- AVANT d'appeler cut_video, CALCULE la duree totale : somme de (end - start) de chaque segment.
+- Si la somme depasse la duree cible, RETIRE des segments ou RACCOURCIS-les.
+- Exemple : duree cible 30s, segments = [(0,12), (45,58), (90,105)] → total = 12+13+15 = 40s → TROP LONG → retirer un segment.
+
+## SOUS-TITRES — SYNCHRONISATION
+- CRITIQUE : les sous-titres doivent etre synchronises avec l'audio de la video FINALE.
+- Pipeline correct :
+  1. Transcrire la video ORIGINALE (pour analyser et choisir les segments)
+  2. Couper la video (cut_video)
+  3. RE-TRANSCRIRE la video COUPEE (nouveau appel a transcribe_video sur le fichier coupe)
+  4. Bruler les sous-titres sur la video coupee avec la NOUVELLE transcription
+- Ne JAMAIS utiliser la transcription de l'original sur la video coupee.
+
 ## PIPELINE
 1. get_video_info — analyser le fichier source
-2. transcribe_video — obtenir les mots avec timestamps
+2. transcribe_video — transcrire l'original (pour analyse)
 3. ANALYSER la transcription (dans ta reflexion, pas un outil)
-4. cut_video — decouper les segments identifies
-5. remove_silence — supprimer les gaps
-6. burn_subtitles — ajouter les sous-titres
-7. generate_text_frame — creer l'ecran de fin
-8. concat_videos — assembler video + text frame
+4. cut_video — decouper les segments identifies (avec aspect_ratio si demande)
+5. transcribe_video — RE-TRANSCRIRE la video coupee (pour sync sous-titres)
+6. burn_subtitles — ajouter les sous-titres avec la nouvelle transcription
+7. generate_text_frame — creer l'ecran de fin (optionnel)
+8. concat_videos — assembler video + text frame (si text frame genere)
 9. save_output — enregistrer chaque delivrable
 
 ## METHODE DE DECOUPE AVANCEE (issue des corrections de Kevin)
@@ -457,7 +472,25 @@ Pour chaque video produite, generer une description Instagram :
   const workDir = path.join(jobDir, "work");
   fs.mkdirSync(workDir, { recursive: true });
 
-  const userMessage = `Voici les videos uploadees:\n${videoList}\n\nRepertoire de travail: ${workDir}\nStyle: ${params.style}${params.accentColor ? `\nCouleur accent: ${params.accentColor}` : ""}\n\n## Prompt:\n${params.prompt}`;
+  const durationInfo = params.videoType === "teaser" ? `\nDuree cible: ${params.duration} secondes MAXIMUM (STRICT — ne pas depasser)` : "";
+  const formatInfo = params.format && params.format !== "original" ? `\nFormat: ${params.format} (utiliser aspect_ratio "${params.format}" dans cut_video)` : "";
+  const langCode = params.language || "fr";
+
+  const userMessage = `Voici les videos uploadees:
+${videoList}
+
+Repertoire de travail: ${workDir}
+Type de montage: ${params.videoType || "teaser"}${durationInfo}${formatInfo}
+Style sous-titres: ${params.style}
+Langue: ${langCode}${params.accentColor ? `\nCouleur accent: ${params.accentColor}` : ""}
+
+## INSTRUCTIONS IMPORTANTES
+- Type "${params.videoType}": ${params.videoType === "teaser" ? `Produis un teaser/reel de MAXIMUM ${params.duration} secondes. Calcule la duree totale de tes segments AVANT de couper. Si la somme depasse ${params.duration}s, REDUIS le nombre de segments.` : params.videoType === "clean" ? "Nettoie la video complete (supprime silences, faux departs, doublons)." : "Extrais plusieurs clips courts independants avec chacun son hook."}
+- SOUS-TITRES : Apres avoir coupe la video, tu DOIS re-transcrire la VIDEO COUPEE (pas l'originale) avant de bruler les sous-titres. Les timestamps de la transcription originale ne correspondent plus a la video coupee.
+- Utilise la langue "${langCode}" pour la transcription.
+
+## Prompt de l'utilisateur:
+${params.prompt}`;
 
   updateStatus({ status: "processing", step: "Initialisation", progress: 5, message: "Demarrage du pipeline..." });
   addLog(`Demarrage avec ${params.fileNames.length} video(s)`);
