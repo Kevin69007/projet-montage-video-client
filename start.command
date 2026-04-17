@@ -34,44 +34,39 @@ fi
 
 echo "Docker: OK"
 
-# --- Check Claude auth token ---
+# --- Refresh Claude auth token (tokens rotate, must refresh each launch) ---
 
 ENV_FILE=".env"
 
-if [ ! -f "$ENV_FILE" ] || ! grep -q "CLAUDE_CODE_OAUTH_TOKEN=sk-" "$ENV_FILE" 2>/dev/null; then
-  echo ""
-  echo "========================================="
-  echo "  CONNEXION CLAUDE (une seule fois)"
-  echo "========================================="
-  echo ""
+# Preserve existing env vars (like GEMINI_API_KEY) but refresh the Claude token
+EXISTING_GEMINI=""
+if [ -f "$ENV_FILE" ]; then
+  EXISTING_GEMINI=$(grep "GEMINI_API_KEY" "$ENV_FILE" 2>/dev/null)
+fi
 
-  # Try extracting token from macOS Keychain (where claude login stores it)
-  TOKEN=""
-  if command -v security &>/dev/null; then
-    CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
-    if [ -n "$CREDS" ]; then
-      TOKEN=$(echo "$CREDS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['claudeAiOauth']['accessToken'])" 2>/dev/null)
-    fi
+TOKEN=""
+if command -v security &>/dev/null; then
+  CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+  if [ -n "$CREDS" ]; then
+    TOKEN=$(echo "$CREDS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['claudeAiOauth']['accessToken'])" 2>/dev/null)
   fi
+fi
 
-  if [ -n "$TOKEN" ] && echo "$TOKEN" | grep -q "^sk-ant-"; then
-    echo "CLAUDE_CODE_OAUTH_TOKEN=$TOKEN" > "$ENV_FILE"
-    echo "Token extrait du trousseau macOS."
-  else
-    echo "Impossible d'extraire le token automatiquement."
-    echo ""
-    echo "Assure-toi d'etre connecte a Claude :"
-    echo "  claude login"
-    echo ""
-    echo "Puis relance ce script."
-    echo ""
-    echo "Ou cree manuellement un fichier .env avec :"
-    echo "  CLAUDE_CODE_OAUTH_TOKEN=ton_token_ici"
-    echo "  (obtenu via 'claude setup-token')"
-    echo ""
-    read -p "Appuie sur Entree pour fermer..."
-    exit 1
-  fi
+if [ -n "$TOKEN" ] && echo "$TOKEN" | grep -q "^sk-ant-"; then
+  echo "CLAUDE_CODE_OAUTH_TOKEN=$TOKEN" > "$ENV_FILE"
+  [ -n "$EXISTING_GEMINI" ] && echo "$EXISTING_GEMINI" >> "$ENV_FILE"
+  echo "Token Claude: OK (rafraichi)"
+else
+  echo ""
+  echo "ERREUR: Impossible d'extraire le token Claude."
+  echo ""
+  echo "Assure-toi d'etre connecte :"
+  echo "  claude login"
+  echo ""
+  echo "Puis relance ce script."
+  echo ""
+  read -p "Appuie sur Entree pour fermer..."
+  exit 1
 fi
 
 echo "Token Claude: OK"
