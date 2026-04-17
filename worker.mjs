@@ -196,12 +196,24 @@ async function main() {
       case "burn_subtitles": {
         const style = input.style || "hormozi";
         const script = style === "cove" ? "burn_subtitles_cove.py" : "burn_subtitles.py";
-        const accentColor = input.accent_color || "#6C2BD9";
-        const fontSize = input.font_size || 90;
-        const wpl = input.words_per_line || 3;
+
+        // Load style config from styles.json
+        const stylesPath = path.join(PIPELINE_DIR, "styles.json");
+        let styleConfig = {};
+        try {
+          const styles = JSON.parse(fs.readFileSync(stylesPath, "utf-8"));
+          styleConfig = styles[style] || styles["hormozi"] || {};
+        } catch (_) { /* use defaults */ }
+
+        // Use style config values, with input overrides
+        const accentColor = input.accent_color || styleConfig.accentColor || "#6C2BD9";
+        const fontSize = input.font_size || styleConfig.size || 90;
+        const wpl = input.words_per_line || styleConfig.wordsPerLine || 3;
         const maxLines = input.max_lines || 2;
+
+        console.log(`[WORKER ${jobId}] Subtitles: style=${style}, accent=${accentColor}, size=${fontSize}, wpl=${wpl}`);
         exec(`python3 "${SCRIPTS_DIR}/${script}" "${input.video_path}" "${input.transcription_path}" "${accentColor}" "${input.output_path}" ${fontSize} ${wpl} ${maxLines}`, 600000);
-        return { success: true, result: `Subtitles (${style}) burned → ${input.output_path}` };
+        return { success: true, result: `Subtitles (${style}, accent=${accentColor}, size=${fontSize}) burned → ${input.output_path}` };
       }
       case "generate_text_frame": {
         const linesStr = input.lines.join("|");
