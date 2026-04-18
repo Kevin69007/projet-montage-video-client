@@ -1,109 +1,90 @@
 # Installation — Montage Video
 
 Application web locale pour le montage video automatise avec Claude.
-Upload tes videos, ecris un prompt, et Claude produit des videos montees (teasers, reels, version longue).
+Deux modes : **Video** (montage, sous-titres, teasers) et **Miniature** (thumbnails IA style YouTube).
 
-**Un abonnement Claude (Max ou Pro) est requis** — pas de cle API.
+**Un abonnement Claude (Max ou Pro) est requis.**
 
 ---
 
-## Methode 1 : Docker (recommande — Mac + Windows)
+## Docker (recommande — Mac + Windows)
 
-Tout est installe automatiquement dans le conteneur Docker : Node.js, Python, FFmpeg, Whisper, Claude CLI, nano-banana (generation miniatures IA).
+Tout est installe automatiquement : Node.js, Python, FFmpeg, Whisper, Claude CLI, nano-banana (miniatures IA).
 
-### Pre-requis
+### Ce qu'il faut installer
 
-1. **Docker Desktop** — telecharge et installe depuis https://www.docker.com/products/docker-desktop/
-   - **Windows** : necessite WSL2 (Docker Desktop le propose a l'installation). Redemarrer le PC si demande.
+1. **Docker Desktop** — https://www.docker.com/products/docker-desktop/
+   - Windows : WSL2 requis (Docker Desktop le propose a l'installation)
 
-2. **Etre connecte a Claude** — tu dois avoir fait `claude login` au moins une fois sur ta machine.
-   Si ce n'est pas le cas :
+2. **Claude CLI** — pour l'authentification :
+   - Installe Node.js : https://nodejs.org/
+   - Puis dans un terminal :
    ```bash
    npm install -g @anthropic-ai/claude-code
    claude login
    ```
-   Le script `start.command` extrait ensuite le token automatiquement depuis ton trousseau macOS.
 
-3. **Cle API Gemini** (pour les miniatures IA) — gratuite :
+3. **Cle API Gemini** (gratuite, pour les miniatures IA) :
    - Va sur https://aistudio.google.com/apikey
-   - Cree une cle API
-   - Le script te la demandera au premier lancement
+   - Cree une cle — le script la demandera au premier lancement
 
-### Premier lancement
-
-**Mac :** Double-clique sur `start.command`
-**Windows :** Double-clique sur `start.bat`
-
-Le script fait tout automatiquement :
-
-1. Verifie que Docker est installe et demarre
-2. Extrait le token Claude depuis le trousseau macOS (une seule fois, sauvegarde dans `.env`)
-3. Demande la cle Gemini pour les miniatures IA (une seule fois)
-4. Construit l'image Docker (~5-10 min la premiere fois)
-5. Demarre le serveur et ouvre http://localhost:3000
-
-### Lancements suivants
+### Lancer
 
 **Mac :** Double-clique `start.command`
 **Windows :** Double-clique `start.bat`
 
-L'interface s'ouvre automatiquement. Pas de login, pas de configuration.
+Le script gere tout :
+- Rafraichit le token Claude (automatique sur Mac via le trousseau)
+- Demande la cle Gemini au premier lancement
+- Construit l'image Docker (~5-10 min la premiere fois)
+- Ouvre http://localhost:3000
+
+Les lancements suivants sont instantanes.
 
 ### Arreter
 
-Ctrl+C dans le terminal, ou :
-```bash
-docker compose down
-```
+Ctrl+C dans le terminal, ou `docker compose down`
 
-### Mise a jour
+### Reconstruire (apres mise a jour)
 
-Pour reconstruire l'image (nouvelle version de Claude CLI, Whisper, etc.) :
 ```bash
 docker compose build --no-cache
 ```
 
-### Renouveler le token Claude
+### Note Windows
 
-Le token expire apres 1 an. Pour le renouveler :
-```bash
-claude setup-token
-```
-Puis remplace la ligne `CLAUDE_CODE_OAUTH_TOKEN=...` dans le fichier `.env`.
+Sur Windows, le token Claude ne peut pas etre extrait automatiquement du trousseau.
+Au premier lancement, `start.bat` te demandera de coller ton token manuellement :
+1. Lance `claude setup-token` dans un terminal
+2. Copie le token affiche
+3. Colle-le quand le script le demande
 
 ### Depannage
 
 | Probleme | Solution |
 |----------|----------|
-| "Docker n'est pas installe" | Telecharge Docker Desktop : https://www.docker.com/products/docker-desktop/ |
-| "Docker n'est pas demarre" | Lance Docker Desktop, puis relance le script |
-| "Claude CLI n'est pas installe" | `npm install -g @anthropic-ai/claude-code` |
-| Token invalide / expire | `claude setup-token` puis mets a jour `.env` |
-| Build Docker echoue | Verifie ta connexion internet, relance `docker compose build` |
-| Port 3000 occupe | Arrete le service qui l'utilise, ou change le port dans `docker-compose.yml` |
-| Transcription lente | Normal : ~1-3 min par minute de video avec Whisper |
-| "Aucun fichier produit" | Verifie les logs dans la page de progression |
+| "Docker n'est pas installe" | Installe Docker Desktop |
+| "Docker n'est pas demarre" | Lance Docker Desktop |
+| Erreur d'authentification Claude | Relance `claude login` puis relance le script |
+| Build echoue | Verifie ta connexion internet, `docker compose build --no-cache` |
+| Port 3000 occupe | Change le port dans `docker-compose.yml` |
+| Miniatures basiques (pas IA) | Verifie que `GEMINI_API_KEY` est dans `.env` |
+| Transcription lente | Normal : ~1-3 min par minute de video |
 
 ---
 
-## Methode 2 : Installation native (Mac uniquement, sans Docker)
+## Installation native (Mac uniquement, sans Docker)
 
-Pour ceux qui preferent ne pas utiliser Docker. Necessite d'installer chaque dependance manuellement.
-
-### Pre-requis
+Pour ceux qui preferent ne pas utiliser Docker.
 
 ```bash
 # Homebrew
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-# Node.js
-brew install node
+# Node.js + Python + FFmpeg
+brew install node python3 ffmpeg
 
-# Python 3
-brew install python3
-
-# FFmpeg + libass (pour les sous-titres)
-brew install ffmpeg
+# FFmpeg avec libass (pour les sous-titres ASS)
 brew tap homebrew-ffmpeg/ffmpeg
 brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-libass
 
@@ -114,32 +95,61 @@ claude login
 # Python deps
 pip3 install openai-whisper Pillow
 
+# Bun + nano-banana (miniatures IA)
+curl -fsSL https://bun.sh/install | bash
+git clone https://github.com/kingbootoshi/nano-banana-2-skill.git ~/tools/nano-banana-2
+cd ~/tools/nano-banana-2 && bun install && bun link
+mkdir -p ~/.nano-banana && echo "GEMINI_API_KEY=ta_cle_ici" > ~/.nano-banana/.env
+
 # Dependances Node du projet
 cd /chemin/vers/le/projet
 npm install
 ```
 
-### Lancer
-
-Double-clique sur `start-native.command`
-
-Ou dans le terminal :
-```bash
-npm run dev
-# Ouvre http://localhost:3000
-```
+Lancer : double-clique `start-native.command` ou `npm run dev`
 
 ---
 
 ## Utilisation
 
-1. **Upload** — Glisse tes videos (MP4, MOV, etc.)
-2. **Prompt** — Decris ce que tu veux ("Fais un reel de 30s avec les meilleurs moments")
-3. **Style** — Choisis le style de sous-titres (Hormozi, Cove, MrBeast, etc.)
-4. **Options** — Type (teaser/longue/multi), duree, format (9:16, 16:9), langue
-5. **Lancer** — Clique sur "Lancer le montage"
-6. **Resultat** — Attends le pipeline (transcription, decoupe, sous-titres, assemblage)
-7. **Download** — Telecharge les fichiers produits
+### Mode Video
+1. Selectionne **Video** en haut
+2. Upload tes videos (MP4, MOV, etc.)
+3. Ecris ton prompt ("Fais un reel de 30s avec les meilleurs moments")
+4. Choisis le style de sous-titres (Hormozi, Cove, MrBeast, etc.)
+5. Configure : type (teaser/longue/multi), duree, format (9:16, 16:9), langue
+6. Clique "Lancer le montage"
+7. Telecharge les videos produites
+
+### Mode Miniature
+1. Selectionne **Miniature** en haut
+2. Upload la video source (pour extraire les meilleures frames)
+3. Upload une **image de reference** (la miniature dont tu veux t'inspirer)
+4. Ecris ton prompt ("Miniature YouTube style gaming avec texte gros")
+5. Optionnel : texte a afficher, nombre de miniatures (defaut 2), couleur accent
+6. Clique "Generer les miniatures"
+7. Resultat : miniature 1 = fidele a la reference, miniature 2 = variante creative
+
+## Comment ca marche
+
+```
+Interface web (localhost:3000)
+       |
+       v
+   worker.mjs — orchestre Claude CLI
+       |
+       v
+   Claude (claude -p) — agent autonome
+       |
+       +-- Mode Video :
+       |     transcribe.py (Whisper) → ffmpeg (decoupe) →
+       |     burn_subtitles.py (sous-titres) → generate_text_frame.py →
+       |     ffmpeg (assemblage) → video finale
+       |
+       +-- Mode Miniature :
+             ffmpeg (extraction frames) → nano-banana (generation IA Gemini) →
+             miniatures style reference
+```
 
 ## Architecture
 
@@ -147,26 +157,14 @@ npm run dev
 start.command          <- Double-clic Mac (Docker)
 start.bat              <- Double-clic Windows (Docker)
 start-native.command   <- Double-clic Mac (sans Docker)
-Dockerfile             <- Image Docker avec toutes les deps
+Dockerfile             <- Image Docker (Node, Python, FFmpeg, Whisper, Bun, nano-banana)
 docker-compose.yml     <- Config Docker
-.env                   <- Token Claude (genere automatiquement, gitignore)
+.env                   <- Tokens Claude + Gemini (gitignore)
 app/                   <- Interface web Next.js
-worker.mjs             <- Orchestre Claude CLI pour le pipeline
+worker.mjs             <- Orchestre Claude CLI
 pipeline/
-  scripts/             <- Python (transcribe, burn_subtitles, text_frame)
-  fonts/               <- Polices (BigShoulders, InstrumentSans, PlayfairDisplay)
-  styles.json          <- 7 presets de sous-titres
-jobs/                  <- Videos uploadees + resultats (cree automatiquement)
+  scripts/             <- Python (transcribe, burn_subtitles, text_frame, generate_thumbnail)
+  fonts/               <- BigShoulders, InstrumentSans, PlayfairDisplay
+  styles.json          <- 7 presets sous-titres
+jobs/                  <- Uploads + resultats (cree automatiquement)
 ```
-
-## Comment ca marche
-
-1. Tu uploades des videos et ecris un prompt
-2. Le serveur cree un job et lance `worker.mjs`
-3. `worker.mjs` appelle `claude -p` (Claude CLI) avec ton prompt + les instructions de montage
-4. Claude analyse, decoupe, sous-titre et assemble automatiquement via :
-   - `transcribe.py` (Whisper) pour la transcription
-   - `ffmpeg` pour la decoupe et l'assemblage
-   - `burn_subtitles.py` pour les sous-titres
-   - `generate_text_frame.py` pour les ecrans de fin
-5. Les fichiers produits apparaissent dans l'interface pour telechargement
