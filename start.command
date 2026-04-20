@@ -46,7 +46,11 @@ fi
 
 TOKEN=""
 if command -v security &>/dev/null; then
-  CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+  CREDS=$(security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w 2>/dev/null)
+  # Fallback: si pas d'entree avec l'account utilisateur, prend n'importe laquelle
+  if [ -z "$CREDS" ]; then
+    CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+  fi
   if [ -n "$CREDS" ]; then
     TOKEN=$(echo "$CREDS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['claudeAiOauth']['accessToken'])" 2>/dev/null)
   fi
