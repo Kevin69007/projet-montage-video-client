@@ -513,7 +513,7 @@ async function main() {
 
   const child = spawn(claudePath, args, {
     cwd: workDir,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
       PATH: `${path.join(process.env.HOME || "", ".local", "bin")}:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}`,
