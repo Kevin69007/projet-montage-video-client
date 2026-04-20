@@ -57,6 +57,7 @@ export async function startProcessing(params: {
   language: string;
   thumbnailCount?: number;
   thumbnailText?: string;
+  thumbnailFormat?: string;
   referenceFileName?: string;
 }): Promise<{ ok: boolean }> {
   const res = await fetch(`${API_BASE}/api/process`, {

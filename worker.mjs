@@ -280,7 +280,7 @@ Quand le mode est "miniature", tu produis des IMAGES de miniature (thumbnails) p
 
 **Commande de base :**
 \`\`\`bash
-nano-banana "<description detaillee de la miniature>" -r "<reference.jpg>" -r "<frame.jpg>" -o "<nom_sortie>" -s 1K -a 16:9 -d "<output_dir>"
+nano-banana "<description detaillee de la miniature>" -r "<reference.jpg>" -r "<frame.jpg>" -o "<nom_sortie>" -s 1K -a <FORMAT> -d "<output_dir>"
 \`\`\`
 
 **Parametres :**
@@ -305,11 +305,11 @@ nano-banana "<description detaillee de la miniature>" -r "<reference.jpg>" -r "<
 3. **Generer chaque miniature avec nano-banana** :
    - Miniature 1 (style fidele) :
      \`\`\`bash
-     nano-banana "YouTube thumbnail. [DESCRIPTION PRECISE DU STYLE DE LA REFERENCE]. Use the person/subject from the second reference image. [TEXTE SI FOURNI]. Match the exact style, colors, layout, and decorations of the first reference image." -r "<reference.jpg>" -r "<meilleure_frame.jpg>" -o "miniature_1" -s 1K -a 16:9 -d "<output_dir>"
+     nano-banana "YouTube thumbnail. [DESCRIPTION PRECISE DU STYLE DE LA REFERENCE]. Use the person/subject from the second reference image. [TEXTE SI FOURNI]. Match the exact style, colors, layout, and decorations of the first reference image." -r "<reference.jpg>" -r "<meilleure_frame.jpg>" -o "miniature_1" -s 1K -a <FORMAT> -d "<output_dir>"
      \`\`\`
    - Miniature 2+ (style creatif) :
      \`\`\`bash
-     nano-banana "YouTube thumbnail. [VARIANTE CREATIVE INSPIREE DE LA REFERENCE]. Use the person/subject from the second reference image but with a different pose/expression. More creative and bold composition." -r "<reference.jpg>" -r "<autre_frame.jpg>" -o "miniature_2" -s 1K -a 16:9 -d "<output_dir>"
+     nano-banana "YouTube thumbnail. [VARIANTE CREATIVE INSPIREE DE LA REFERENCE]. Use the person/subject from the second reference image but with a different pose/expression. More creative and bold composition." -r "<reference.jpg>" -r "<autre_frame.jpg>" -o "miniature_2" -s 1K -a <FORMAT> -d "<output_dir>"
      \`\`\`
 
 4. **Sauvegarder** — Les fichiers sont deja dans output_dir via \`-d\`. Ecrire outputs.json.
@@ -321,7 +321,7 @@ nano-banana "<description detaillee de la miniature>" -r "<reference.jpg>" -r "<
 - Miniature 1 : reproduire fidelement le style de la reference
 - Miniature 2+ : variante creative, frame differente
 - Si nano-banana echoue (GEMINI_API_KEY non configure), fallback sur un script Pillow simple
-- Resolution : utiliser \`-s 1K -a 16:9\` pour format YouTube
+- Resolution : utiliser \`-s 1K -a <FORMAT>\` avec le format specifie par l'utilisateur (16:9 YouTube, 9:16 Reel, 1:1 carre, 4:5 post Instagram, 4:3 standard)
 - TOUJOURS produire au moins une miniature`;
 }
 
@@ -408,7 +408,8 @@ Repertoire de sortie : ${outputDir}
 Fichier manifeste : ${outputsJsonPath}
 
 ## Parametres
-Nombre de miniatures a produire : ${params.thumbnailCount || 2}${params.thumbnailText ? `\nTexte a ajouter : "${params.thumbnailText}"` : ""}${params.accentColor ? `\nCouleur accent : ${params.accentColor}` : ""}
+Nombre de miniatures a produire : ${params.thumbnailCount || 2}
+Format : ${params.thumbnailFormat || "16:9"} (utilise -a ${params.thumbnailFormat || "16:9"} dans nano-banana)${params.thumbnailText ? `\nTexte a ajouter : "${params.thumbnailText}"` : ""}${params.accentColor ? `\nCouleur accent : ${params.accentColor}` : ""}
 
 ## INSTRUCTIONS
 1. Extrais 8-12 frames de la video a des moments expressifs/interessants (utilise ffmpeg -ss)

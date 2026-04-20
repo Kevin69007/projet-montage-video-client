@@ -35,6 +35,7 @@ export default function Home() {
   const [referenceImage, setReferenceImage] = useState<File | null>(null);
   const [thumbnailCount, setThumbnailCount] = useState(2);
   const [thumbnailText, setThumbnailText] = useState("");
+  const [thumbnailFormat, setThumbnailFormat] = useState("16:9");
 
   const canSubmit =
     files.length > 0 &&
@@ -82,6 +83,7 @@ export default function Home() {
         // Miniature params
         thumbnailCount,
         thumbnailText: thumbnailText || undefined,
+        thumbnailFormat,
         referenceFileName: referenceImage?.name,
       });
       router.push(`/job/${jobId}`);
@@ -189,7 +191,22 @@ export default function Home() {
               placeholder="Decris le style de miniature souhaite... Ex: Miniature YouTube avec texte gros, fond flou, visage expressif"
             />
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+              <div>
+                <label className="mono-label block mb-2">Format</label>
+                <select
+                  value={thumbnailFormat}
+                  onChange={(e) => setThumbnailFormat(e.target.value)}
+                  className="glass-input w-full"
+                >
+                  <option value="16:9">16:9 YouTube</option>
+                  <option value="9:16">9:16 Reel / Story</option>
+                  <option value="1:1">1:1 Carre Instagram</option>
+                  <option value="4:5">4:5 Post Instagram</option>
+                  <option value="4:3">4:3 Standard</option>
+                </select>
+              </div>
+
               <div>
                 <label className="mono-label block mb-2">Texte miniature</label>
                 <input
@@ -202,7 +219,7 @@ export default function Home() {
               </div>
 
               <div>
-                <label className="mono-label block mb-2">Nombre de miniatures</label>
+                <label className="mono-label block mb-2">Nombre</label>
                 <input
                   type="number"
                   value={thumbnailCount}
