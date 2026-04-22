@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 REM
 REM Montage Video — Windows Docker Launcher
 REM Double-cliquer ce fichier pour demarrer.
@@ -36,57 +37,36 @@ if errorlevel 1 (
 
 echo Docker: OK
 
-REM --- Check Claude auth token ---
+if not exist ".env" type nul > .env
 
-if not exist ".env" goto :need_token
-findstr /c:"CLAUDE_CODE_OAUTH_TOKEN" .env >nul 2>&1
-if errorlevel 1 goto :need_token
-goto :token_ok
+REM --- Check Kimi API key ---
 
-:need_token
-echo.
-echo =========================================
-echo   CONNEXION CLAUDE (une seule fois)
-echo =========================================
-echo.
-echo Claude CLI a besoin d'un token d'authentification.
-echo.
-
-REM Check if claude is available on host
-where claude >nul 2>&1
+findstr /c:"KIMI_API_KEY=sk-" .env >nul 2>&1
 if errorlevel 1 (
-    echo Claude CLI n'est pas installe sur ta machine.
     echo.
-    echo Pour generer le token :
-    echo   1. Installe Node.js : https://nodejs.org/
-    echo   2. npm install -g @anthropic-ai/claude-code
-    echo   3. claude setup-token
+    echo =========================================
+    echo   KIMI API KEY (pour l'IA)
+    echo =========================================
     echo.
-    echo Puis cree un fichier .env dans ce dossier avec :
-    echo   CLAUDE_CODE_OAUTH_TOKEN=ton_token_ici
+    echo Pour le montage IA, tu as besoin d'une cle API Kimi.
     echo.
-    pause
-    exit /b 1
+    echo   1. Va sur https://platform.moonshot.ai/
+    echo   2. Cree un compte et une cle API
+    echo   3. Colle-la ici :
+    echo.
+    set /p KIMI_KEY="Kimi API Key: "
+
+    if "!KIMI_KEY!"=="" (
+        echo Aucune cle entree. Le pipeline ne peut pas demarrer.
+        pause
+        exit /b 1
+    )
+
+    echo KIMI_API_KEY=!KIMI_KEY!>> .env
+    echo Cle Kimi sauvegardee.
 )
 
-echo Lance "claude setup-token" pour generer un token.
-echo Si une fenetre de navigateur s'ouvre, connecte-toi avec ton compte Claude.
-echo.
-echo Copie le token affiche et colle-le ci-dessous :
-echo.
-set /p TOKEN="Token: "
-
-if "%TOKEN%"=="" (
-    echo Aucun token entre.
-    pause
-    exit /b 1
-)
-
-echo CLAUDE_CODE_OAUTH_TOKEN=%TOKEN%> .env
-echo Token sauvegarde dans .env
-
-:token_ok
-echo Token Claude: OK
+echo Kimi: OK
 
 REM --- Check Gemini API key ---
 
@@ -100,14 +80,14 @@ if errorlevel 1 (
     echo Pour generer des miniatures avec l'IA :
     echo   1. Va sur https://aistudio.google.com/apikey
     echo   2. Cree une cle API
-    echo   3. Colle-la ici :
+    echo   3. Colle-la ici (ou laisse vide pour sauter) :
     echo.
     set /p GEMINI_KEY="Gemini API Key: "
     if not "!GEMINI_KEY!"=="" (
         echo GEMINI_API_KEY=!GEMINI_KEY!>> .env
         echo Cle Gemini sauvegardee.
     ) else (
-        echo Pas de cle Gemini — miniatures AI desactivees.
+        echo Pas de cle Gemini — les miniatures AI ne fonctionneront pas.
     )
 )
 
@@ -131,8 +111,6 @@ if errorlevel 1 (
 echo Attente du demarrage...
 timeout /t 5 /nobreak >nul
 
-REM --- Open browser ---
-
 echo.
 echo =========================================
 echo   PRET !
@@ -144,5 +122,4 @@ echo.
 
 start http://localhost:3000
 
-REM Follow logs
 docker compose logs -f app

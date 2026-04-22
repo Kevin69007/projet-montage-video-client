@@ -34,44 +34,41 @@ fi
 
 echo "Docker: OK"
 
-# --- Refresh Claude auth token (tokens rotate, must refresh each launch) ---
-
 ENV_FILE=".env"
+touch "$ENV_FILE"
 
-# Preserve existing env vars (like GEMINI_API_KEY) but refresh the Claude token
-EXISTING_GEMINI=""
-if [ -f "$ENV_FILE" ]; then
-  EXISTING_GEMINI=$(grep "GEMINI_API_KEY" "$ENV_FILE" 2>/dev/null)
-fi
+# --- Check Kimi API key ---
 
-TOKEN=""
-if command -v security &>/dev/null; then
-  CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
-  if [ -n "$CREDS" ]; then
-    TOKEN=$(echo "$CREDS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['claudeAiOauth']['accessToken'])" 2>/dev/null)
+if ! grep -q "KIMI_API_KEY=sk-" "$ENV_FILE" 2>/dev/null; then
+  echo ""
+  echo "========================================="
+  echo "  KIMI API KEY (pour l'IA)"
+  echo "========================================="
+  echo ""
+  echo "Pour le montage IA, tu as besoin d'une cle API Kimi."
+  echo ""
+  echo "1. Va sur https://platform.moonshot.ai/"
+  echo "2. Cree un compte et une cle API"
+  echo "3. Colle-la ici :"
+  echo ""
+  read -p "Kimi API Key: " KIMI_KEY
+
+  if [ -z "$KIMI_KEY" ]; then
+    echo "Aucune cle entree. Le pipeline ne peut pas demarrer."
+    read -p "Appuie sur Entree pour fermer..."
+    exit 1
   fi
+
+  # Remove any existing KIMI_API_KEY line, then append
+  grep -v "^KIMI_API_KEY=" "$ENV_FILE" > "$ENV_FILE.tmp" 2>/dev/null || true
+  mv "$ENV_FILE.tmp" "$ENV_FILE" 2>/dev/null || true
+  echo "KIMI_API_KEY=$KIMI_KEY" >> "$ENV_FILE"
+  echo "Cle Kimi sauvegardee."
 fi
 
-if [ -n "$TOKEN" ] && echo "$TOKEN" | grep -q "^sk-ant-"; then
-  echo "CLAUDE_CODE_OAUTH_TOKEN=$TOKEN" > "$ENV_FILE"
-  [ -n "$EXISTING_GEMINI" ] && echo "$EXISTING_GEMINI" >> "$ENV_FILE"
-  echo "Token Claude: OK (rafraichi)"
-else
-  echo ""
-  echo "ERREUR: Impossible d'extraire le token Claude."
-  echo ""
-  echo "Assure-toi d'etre connecte :"
-  echo "  claude login"
-  echo ""
-  echo "Puis relance ce script."
-  echo ""
-  read -p "Appuie sur Entree pour fermer..."
-  exit 1
-fi
+echo "Kimi: OK"
 
-echo "Token Claude: OK"
-
-# --- Check Gemini API key (for AI thumbnail generation) ---
+# --- Check Gemini API key (for thumbnails) ---
 
 if ! grep -q "GEMINI_API_KEY=" "$ENV_FILE" 2>/dev/null; then
   echo ""
@@ -84,7 +81,7 @@ if ! grep -q "GEMINI_API_KEY=" "$ENV_FILE" 2>/dev/null; then
   echo ""
   echo "1. Va sur https://aistudio.google.com/apikey"
   echo "2. Cree une cle API"
-  echo "3. Colle-la ici :"
+  echo "3. Colle-la ici (ou laisse vide pour sauter) :"
   echo ""
   read -p "Gemini API Key: " GEMINI_KEY
 
@@ -93,11 +90,10 @@ if ! grep -q "GEMINI_API_KEY=" "$ENV_FILE" 2>/dev/null; then
     echo "Cle Gemini sauvegardee."
   else
     echo "Pas de cle Gemini — les miniatures AI ne fonctionneront pas."
-    echo "(Tu peux l'ajouter plus tard dans .env : GEMINI_API_KEY=ta_cle)"
   fi
 fi
 
-echo "Gemini: $(grep -q 'GEMINI_API_KEY=' "$ENV_FILE" 2>/dev/null && echo 'OK' || echo 'Non configure')"
+echo "Gemini: $(grep -q 'GEMINI_API_KEY=.' "$ENV_FILE" 2>/dev/null && echo 'OK' || echo 'Non configure')"
 
 # --- Build and start ---
 
@@ -117,7 +113,6 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-# Wait for container to be ready
 echo "Attente du demarrage..."
 sleep 5
 
@@ -134,8 +129,6 @@ echo ""
 
 open http://localhost:3000
 
-# Handle Ctrl+C
 trap "echo ''; echo 'Arret...'; docker compose down; exit 0" INT TERM
 
-# Follow logs
 docker compose logs -f app

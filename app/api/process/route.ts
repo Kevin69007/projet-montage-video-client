@@ -4,19 +4,6 @@ import * as path from "path";
 
 export const runtime = "nodejs";
 
-function findClaude(): string | null {
-  const home = process.env.HOME || "";
-  const candidates = [
-    path.join(home, ".local", "bin", "claude"),
-    "/usr/local/bin/claude",
-    "/opt/homebrew/bin/claude",
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
-  return null;
-}
-
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -29,11 +16,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check Claude CLI is available
-    const claudePath = findClaude();
-    if (!claudePath) {
+    // Check Kimi API key is configured
+    if (!process.env.KIMI_API_KEY) {
       return NextResponse.json(
-        { error: "Claude CLI non trouve. Installe-le et lance 'claude login'. Voir INSTALL.md" },
+        { error: "KIMI_API_KEY non configuree. Ajoute-la dans le fichier .env. Voir INSTALL.md" },
         { status: 500 }
       );
     }

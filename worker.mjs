@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 
 /**
- * Worker process — spawns Claude CLI to run video editing pipeline.
- * Uses the user's Claude subscription (no API key needed).
+ * Worker process — calls Kimi API (Moonshot AI) to run video editing pipeline.
+ * Uses a pay-per-use API key (no Claude subscription needed).
  *
  * Usage: node worker.mjs <jobId>
  * Reads job params from jobs/<jobId>/params.json
+ *
+ * Required env: KIMI_API_KEY
+ * Optional env: KIMI_MODEL (default: kimi-k2.5), GEMINI_API_KEY (for miniatures)
  */
 
 import fs from "fs";
 import path from "path";
-import { spawn } from "child_process";
+import { execSync } from "child_process";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -27,6 +30,10 @@ const statusPath = path.join(jobDir, "status.json");
 const PIPELINE_DIR = path.join(__dirname, "pipeline");
 const SCRIPTS_DIR = path.join(PIPELINE_DIR, "scripts");
 const FONTS_DIR = path.join(PIPELINE_DIR, "fonts");
+
+const KIMI_API_URL = "https://api.moonshot.ai/v1/chat/completions";
+const KIMI_MODEL = process.env.KIMI_MODEL || "kimi-k2.5";
+const MAX_ITERATIONS = 50;
 
 // --- Status helpers ---
 
@@ -63,22 +70,6 @@ function addLog(message) {
   fs.writeFileSync(statusPath, JSON.stringify(status, null, 2));
 }
 
-// --- Find Claude CLI ---
-
-function findClaude() {
-  const candidates = [
-    "/usr/local/lib/node_modules/.bin/claude",  // npm global (Docker)
-    "/usr/local/bin/claude",                     // npm global symlink
-    path.join(process.env.HOME || "", ".local", "bin", "claude"),  // Mac/Linux local
-    "/opt/homebrew/bin/claude",                  // Homebrew Mac
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
-  // Fallback: hope it's in PATH
-  return "claude";
-}
-
 // --- Find ffmpeg-full (with libass for subtitle burning) ---
 
 function findFfmpegFull() {
@@ -104,9 +95,10 @@ function buildSystemPrompt(ffmpegPath) {
 - Ne pose JAMAIS de questions. L'utilisateur ne peut pas repondre.
 - Fais les meilleurs choix editoriaux et execute. Adapte-toi au contenu disponible.
 - TOUJOURS produire au moins un fichier. Ne JAMAIS terminer sans sauvegarder les outputs.
+- Tu as acces aux outils Bash (executer shell), Read (lire fichiers/images), Write (ecrire fichiers).
 
 ## OUTILS DISPONIBLES
-Tu utilises UNIQUEMENT l'outil Bash pour executer des commandes. Voici les scripts et commandes disponibles :
+Tu utilises l'outil Bash pour executer les scripts et commandes :
 
 ### 1. Transcription (Whisper local)
 \`\`\`bash
@@ -165,7 +157,7 @@ Apres transcription, ANALYSE le contenu en profondeur :
 Pour un TEASER ou REEL :
 - **Hook** (0-3s) : La phrase la plus accrocheuse de TOUTE la video. Pas forcement le debut.
 - **Corps** (3s-fin-5s) : Les 2-3 meilleurs moments qui donnent envie d'en voir plus. Par IMPACT, pas chronologique.
-- **Fin PROPRE** : TOUJOURS couper sur une phrase COMPLETE. Jamais au milieu d'un mot. La derniere phrase doit etre une punchline ou un cliffhanger. Marge 0.7-1.0s apres dernier mot.
+- **Fin PROPRE** : TOUJOURS couper sur une phrase COMPLETE. Jamais au milieu d'un mot. Marge 0.7-1.0s apres dernier mot.
 
 ## REGLES DE COUPE
 
@@ -249,9 +241,8 @@ Pour chaque video produite, generer une description Instagram :
 
 ## SAUVEGARDE DES OUTPUTS — OBLIGATOIRE
 Pour CHAQUE delivrable produit :
-1. Copier le fichier final dans le repertoire output :
-   \`cp "<fichier_final>" "<output_dir>/"\`
-2. Ecrire le manifeste outputs.json (ECRASER le fichier a chaque fois avec la liste complete) :
+1. Copier le fichier final dans le repertoire output (utilise Bash : \`cp\`)
+2. Ecrire le manifeste outputs.json (utilise l'outil Write) :
    Le fichier doit contenir un tableau JSON :
    \`\`\`json
    [
@@ -259,10 +250,11 @@ Pour CHAQUE delivrable produit :
      {"file": "miniature.jpg", "label": "Miniature", "description": ""}
    ]
    \`\`\`
-   Ecris ce fichier avec : \`cat > "<outputs_json_path>" << 'MANIFEST_EOF'\n[...contenu...]\nMANIFEST_EOF\`
 
 Tu peux produire PLUSIEURS outputs (2+ videos, miniatures, etc.). Chaque fichier doit avoir son entree dans outputs.json.
 TOUJOURS produire au moins un fichier. Ne JAMAIS terminer sans sauvegarder.
+
+Quand tu as termine tout le travail, reponds avec un message texte SANS appel d'outil pour indiquer la fin.
 
 ## ERREURS A EVITER
 - Ne JAMAIS utiliser les timestamps bruts sans transcrire d'abord
@@ -289,7 +281,7 @@ nano-banana "<description detaillee de la miniature>" -r "<reference.jpg>" -r "<
 - \`-r\` : tu peux aussi passer la frame extraite de la video comme deuxieme reference
 - \`-o\` : nom du fichier de sortie (sans extension)
 - \`-s 1K\` : resolution 1024px
-- \`-a 16:9\` : ratio YouTube (1280x720)
+- \`-a <FORMAT>\` : ratio (16:9, 9:16, 1:1, 4:5, 4:3)
 - \`-d\` : dossier de sortie
 
 ### Pipeline miniature
@@ -317,12 +309,9 @@ nano-banana "<description detaillee de la miniature>" -r "<reference.jpg>" -r "<
 ### Regles miniature
 - TOUJOURS utiliser nano-banana pour generer les miniatures (pas Pillow)
 - Passer la reference ET une frame video comme references (-r -r)
-- Le prompt a nano-banana doit etre TRES detaille : decrire les couleurs, le layout, le style de texte, les decorations
 - Miniature 1 : reproduire fidelement le style de la reference
 - Miniature 2+ : variante creative, frame differente
-- Si nano-banana echoue (GEMINI_API_KEY non configure), fallback sur un script Pillow simple
-- Resolution : utiliser \`-s 1K -a <FORMAT>\` avec le format specifie par l'utilisateur (16:9 YouTube, 9:16 Reel, 1:1 carre, 4:5 post Instagram, 4:3 standard)
-- TOUJOURS produire au moins une miniature`;
+- Resolution : \`-s 1K -a <FORMAT>\` selon le format demande`;
 }
 
 // --- Build user prompt ---
@@ -379,14 +368,12 @@ ${params.prompt}`;
 function buildMiniaturePrompt(params, videoPaths, workDir, outputDir, outputsJsonPath) {
   const inputDir = path.join(jobDir, "input");
 
-  // Separate video files from reference image
   const videoFiles = [];
   let referenceFile = "";
   for (const f of params.fileNames) {
     if (params.referenceFileName && f.includes(params.referenceFileName.replace(/[^a-zA-Z0-9._-]/g, "_"))) {
       referenceFile = path.join(inputDir, f);
     } else if (/\.(jpg|jpeg|png|webp|gif)$/i.test(f)) {
-      // If no explicit reference match, treat image files as reference
       if (!referenceFile) referenceFile = path.join(inputDir, f);
     } else {
       videoFiles.push(path.join(inputDir, f));
@@ -412,27 +399,20 @@ Nombre de miniatures a produire : ${params.thumbnailCount || 2}
 Format : ${params.thumbnailFormat || "16:9"} (utilise -a ${params.thumbnailFormat || "16:9"} dans nano-banana)${params.thumbnailText ? `\nTexte a ajouter : "${params.thumbnailText}"` : ""}${params.accentColor ? `\nCouleur accent : ${params.accentColor}` : ""}
 
 ## INSTRUCTIONS
-1. Extrais 8-12 frames de la video a des moments expressifs/interessants (utilise ffmpeg -ss)
-2. Lis et analyse l'image de reference pour comprendre son style visuel
-3. Pour la miniature 1 : utilise generate_thumbnail.py avec --style match pour reproduire fidelement le style de la reference
-4. Pour les miniatures suivantes : utilise --style creative pour des variations plus audacieuses
-5. Utilise des frames DIFFERENTES pour chaque miniature
-6. SAUVEGARDE : Copie chaque miniature dans ${outputDir}/ et ecris le manifeste ${outputsJsonPath}
+1. Extrais 5-8 frames de la video a des moments expressifs/interessants (utilise ffmpeg -ss + Bash)
+2. Lis l'image de reference avec Read pour comprendre son style visuel
+3. Genere chaque miniature avec nano-banana (voir regles)
+4. SAUVEGARDE : Copie chaque miniature dans ${outputDir}/ et ecris le manifeste ${outputsJsonPath}
 
 ## Prompt de l'utilisateur :
 ${params.prompt}`;
 }
 
-// --- Progress detection from stream-json ---
+// --- Progress detection ---
 
-function detectProgress(line) {
-  const text = typeof line === "string" ? line : JSON.stringify(line);
-
-  // Miniature mode progress
-  if (text.includes("generate_thumbnail.py")) return { step: "Composition", progress: 70, message: "Composition de la miniature..." };
+function detectProgress(text) {
+  if (text.includes("generate_thumbnail.py") || text.includes("nano-banana")) return { step: "Composition", progress: 70, message: "Composition de la miniature..." };
   if (text.includes("frames:v 1")) return { step: "Extraction frames", progress: 30, message: "Extraction des frames..." };
-
-  // Video mode progress
   if (text.includes("transcribe.py")) return { step: "Transcription", progress: 20, message: "Transcription Whisper en cours..." };
   if (text.includes("ffprobe")) return { step: "Analyse", progress: 10, message: "Analyse du fichier video..." };
   if (text.includes("ffmpeg") && (text.includes("-ss") || text.includes("concat"))) {
@@ -442,14 +422,199 @@ function detectProgress(line) {
   }
   if (text.includes("burn_subtitles")) return { step: "Sous-titres", progress: 65, message: "Application des sous-titres..." };
   if (text.includes("generate_text_frame")) return { step: "Text frame", progress: 80, message: "Generation de l'ecran de fin..." };
-  if (text.includes("outputs.json") || text.includes("MANIFEST_EOF")) return { step: "Sauvegarde", progress: 95, message: "Sauvegarde des fichiers..." };
+  if (text.includes("outputs.json")) return { step: "Sauvegarde", progress: 95, message: "Sauvegarde des fichiers..." };
   return null;
+}
+
+// --- Tool definitions for Kimi API ---
+
+const TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "Bash",
+      description: "Execute a shell command. Returns stdout+stderr. Use for running Python scripts, ffmpeg, file operations, etc.",
+      parameters: {
+        type: "object",
+        properties: {
+          command: { type: "string", description: "Shell command to execute" },
+          timeout: { type: "number", description: "Timeout in seconds (default 1800 = 30min)" }
+        },
+        required: ["command"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "Read",
+      description: "Read a file. For text files returns the content. For images returns a description via the AI (since raw images are too large).",
+      parameters: {
+        type: "object",
+        properties: {
+          file_path: { type: "string", description: "Absolute file path" }
+        },
+        required: ["file_path"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "Write",
+      description: "Write content to a file (creates or overwrites).",
+      parameters: {
+        type: "object",
+        properties: {
+          file_path: { type: "string", description: "Absolute file path" },
+          content: { type: "string", description: "File content" }
+        },
+        required: ["file_path", "content"]
+      }
+    }
+  }
+];
+
+// --- Tool executors ---
+
+function execBash(command, timeoutSec = 1800, env = {}) {
+  try {
+    const output = execSync(command, {
+      encoding: "utf-8",
+      maxBuffer: 50 * 1024 * 1024,
+      timeout: timeoutSec * 1000,
+      env: { ...process.env, ...env },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    // Truncate very long outputs (Kimi has 256K context, but let's be safe)
+    const trimmed = output.trim();
+    if (trimmed.length > 10000) {
+      return trimmed.slice(0, 5000) + "\n\n[...output truncated...]\n\n" + trimmed.slice(-2000);
+    }
+    return trimmed || "(no output)";
+  } catch (err) {
+    const stderr = (err.stderr || "").toString().trim();
+    const stdout = (err.stdout || "").toString().trim();
+    const combined = [stdout, stderr].filter(Boolean).join("\n");
+    if (err.signal === "SIGTERM" || err.code === "ETIMEDOUT") {
+      return `ERROR: Command timed out after ${timeoutSec}s\n${combined.slice(-2000)}`;
+    }
+    return `ERROR (exit ${err.status}):\n${combined.slice(-3000) || err.message}`;
+  }
+}
+
+function execRead(filePath) {
+  if (!fs.existsSync(filePath)) return `ERROR: File not found: ${filePath}`;
+  const stats = fs.statSync(filePath);
+  if (stats.size > 5 * 1024 * 1024) return `ERROR: File too large (${(stats.size / 1024 / 1024).toFixed(1)}MB)`;
+
+  // Check if image — describe it using Kimi vision
+  const isImage = /\.(jpg|jpeg|png|webp|gif)$/i.test(filePath);
+  if (isImage) {
+    // Return a note — in the main loop we'll handle images separately by sending them as content blocks
+    // For simplicity, we describe the image via a Kimi vision call inline
+    return describeImage(filePath);
+  }
+
+  // Text file
+  try {
+    const content = fs.readFileSync(filePath, "utf-8");
+    if (content.length > 20000) {
+      return content.slice(0, 15000) + "\n\n[...truncated...]\n\n" + content.slice(-3000);
+    }
+    return content;
+  } catch (err) {
+    return `ERROR reading file: ${err.message}`;
+  }
+}
+
+function execWrite(filePath, content) {
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, content);
+    return `File written: ${filePath} (${content.length} chars)`;
+  } catch (err) {
+    return `ERROR writing file: ${err.message}`;
+  }
+}
+
+// --- Image description via Kimi vision ---
+
+async function describeImage(filePath) {
+  try {
+    const imgBuffer = fs.readFileSync(filePath);
+    const ext = path.extname(filePath).slice(1).toLowerCase();
+    const mime = ext === "jpg" ? "jpeg" : ext;
+    const base64 = imgBuffer.toString("base64");
+    const dataUrl = `data:image/${mime};base64,${base64}`;
+
+    const res = await fetch(KIMI_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.KIMI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "moonshot-v1-128k-vision-preview",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image_url", image_url: { url: dataUrl } },
+              { type: "text", text: "Decris cette image en detail : composition, couleurs, fond, elements decoratifs, typographie si texte visible, style visuel global. Sois precis pour permettre la reproduction du style. Reponds en francais." }
+            ]
+          }
+        ],
+        max_tokens: 800,
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      return `[Image ${filePath} — vision API error ${res.status}: ${errText.slice(0, 200)}]`;
+    }
+    const data = await res.json();
+    const description = data.choices?.[0]?.message?.content || "(no description)";
+    return `[Description de l'image ${path.basename(filePath)}]\n${description}`;
+  } catch (err) {
+    return `[Image ${filePath} — could not describe: ${err.message}]`;
+  }
+}
+
+// --- Kimi API call ---
+
+async function callKimi(messages) {
+  const res = await fetch(KIMI_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${process.env.KIMI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: KIMI_MODEL,
+      messages,
+      tools: TOOLS,
+      temperature: 0.3,
+      max_tokens: 4000,
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Kimi API error ${res.status}: ${errText.slice(0, 500)}`);
+  }
+  return res.json();
 }
 
 // --- Main ---
 
 async function main() {
   console.log(`[WORKER ${jobId}] Starting...`);
+
+  if (!process.env.KIMI_API_KEY) {
+    writeError("KIMI_API_KEY not set. Ajoute-la dans le fichier .env");
+    process.exit(1);
+  }
 
   const paramsPath = path.join(jobDir, "params.json");
   if (!fs.existsSync(paramsPath)) {
@@ -458,9 +623,9 @@ async function main() {
   }
 
   const params = JSON.parse(fs.readFileSync(paramsPath, "utf-8"));
-  console.log(`[WORKER ${jobId}] Params: prompt="${params.prompt.slice(0, 50)}...", style=${params.style}, files=${params.fileNames.join(", ")}`);
+  console.log(`[WORKER ${jobId}] Params: mode=${params.mode || "video"}, prompt="${params.prompt.slice(0, 50)}..."`);
+  console.log(`[WORKER ${jobId}] Kimi model: ${KIMI_MODEL}`);
 
-  // Set up directories
   const inputDir = path.join(jobDir, "input");
   const workDir = path.join(jobDir, "work");
   const outputDir = path.join(jobDir, "output");
@@ -470,23 +635,13 @@ async function main() {
 
   const videoPaths = params.fileNames.map(f => path.join(inputDir, f));
 
-  // Find tools
-  const claudePath = findClaude();
   const ffmpegPath = findFfmpegFull();
-  console.log(`[WORKER ${jobId}] Claude CLI: ${claudePath}`);
   console.log(`[WORKER ${jobId}] FFmpeg: ${ffmpegPath}`);
 
-  // Build prompts
   const systemPrompt = buildSystemPrompt(ffmpegPath);
   const userPrompt = buildUserPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath);
 
-  // Write prompts to temp files (avoid shell escaping issues)
-  const systemPromptPath = path.join(jobDir, "system_prompt.txt");
-  const userPromptPath = path.join(jobDir, "user_prompt.txt");
-  fs.writeFileSync(systemPromptPath, systemPrompt);
-  fs.writeFileSync(userPromptPath, userPrompt);
-
-  updateStatus({ status: "processing", step: "Initialisation", progress: 5, message: "Demarrage du pipeline Claude..." });
+  updateStatus({ status: "processing", step: "Initialisation", progress: 5, message: `Demarrage (${KIMI_MODEL})...` });
   if (params.mode === "miniature") {
     const videoCount = params.fileNames.filter(f => /\.(mp4|mov|avi|mkv|webm)$/i.test(f)).length;
     const imageCount = params.fileNames.filter(f => /\.(jpg|jpeg|png|webp|gif)$/i.test(f)).length;
@@ -495,120 +650,106 @@ async function main() {
     addLog(`Demarrage avec ${params.fileNames.length} video(s)`);
   }
 
-  // Spawn Claude CLI
-  const args = [
-    "-p",
-    userPrompt,
-    "--output-format", "stream-json",
-    "--verbose",
-    "--system-prompt", systemPrompt,
-    "--tools", "Bash,Read,Write",
-    "--permission-mode", "bypassPermissions",
-    "--add-dir", jobDir,
-    "--add-dir", PIPELINE_DIR,
-    "--model", "sonnet",
-    "--no-session-persistence",
+  // Build messages array (OpenAI-compatible format)
+  const messages = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt },
   ];
 
-  console.log(`[WORKER ${jobId}] Spawning: ${claudePath} -p ...`);
+  // Environment for tool execution
+  const toolEnv = {
+    PATH: `${path.join(process.env.HOME || "", ".local", "bin")}:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}`,
+    FFMPEG_PATH: ffmpegPath,
+    FONTS_DIR: FONTS_DIR,
+  };
 
-  const child = spawn(claudePath, args, {
-    cwd: workDir,
-    stdio: ["pipe", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      PATH: `${path.join(process.env.HOME || "", ".local", "bin")}:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}`,
-      FFMPEG_PATH: ffmpegPath,
-      FONTS_DIR: FONTS_DIR,
-    },
-  });
-
-  let stderrBuffer = "";
   let lastProgress = 5;
+  let iteration = 0;
 
-  // Parse stream-json from stdout
-  let stdoutBuffer = "";
-  child.stdout.on("data", (chunk) => {
-    stdoutBuffer += chunk.toString();
-    const lines = stdoutBuffer.split("\n");
-    stdoutBuffer = lines.pop() || ""; // keep incomplete line in buffer
+  // Agentic loop
+  while (iteration < MAX_ITERATIONS) {
+    iteration++;
+    console.log(`[WORKER ${jobId}] Iteration ${iteration}/${MAX_ITERATIONS}`);
 
-    for (const line of lines) {
-      if (!line.trim()) continue;
-
-      try {
-        const event = JSON.parse(line);
-
-        // Log assistant messages
-        if (event.type === "assistant" && event.message?.content) {
-          for (const block of event.message.content) {
-            if (block.type === "tool_use" && block.name === "Bash") {
-              const cmd = block.input?.command || "";
-              const shortCmd = cmd.length > 150 ? cmd.slice(0, 150) + "..." : cmd;
-              addLog(`Bash: ${shortCmd}`);
-
-              // Detect progress from command
-              const progress = detectProgress(cmd);
-              if (progress && progress.progress > lastProgress) {
-                lastProgress = progress.progress;
-                updateStatus(progress);
-              }
-            } else if (block.type === "tool_use") {
-              addLog(`${block.name}: ${JSON.stringify(block.input || {}).slice(0, 150)}`);
-            } else if (block.type === "text" && block.text) {
-              const text = block.text.trim();
-              if (text) addLog(`Claude: ${text.slice(0, 300)}`);
-            }
-          }
-        }
-
-        // Check for errors
-        if (event.type === "assistant" && event.error) {
-          addLog(`Erreur Claude: ${event.error}`);
-          if (event.error === "authentication_failed") {
-            writeError("Claude CLI non connecte. Lance 'claude login' dans le terminal.");
-            process.exit(1);
-          }
-        }
-
-        // Check for result (final event)
-        if (event.type === "result") {
-          if (event.is_error) {
-            addLog(`Pipeline termine avec erreur: ${event.result?.slice(0, 300) || "unknown"}`);
-          } else {
-            addLog(`Pipeline Claude termine (${event.num_turns} tours, ${event.duration_ms}ms)`);
-          }
-        }
-      } catch (_) {
-        // Non-JSON line, skip
-      }
+    let response;
+    try {
+      response = await callKimi(messages);
+    } catch (err) {
+      addLog(`Erreur Kimi API: ${err.message}`);
+      writeError(`Kimi API: ${err.message}`);
+      process.exit(1);
     }
-  });
 
-  child.stderr.on("data", (chunk) => {
-    stderrBuffer += chunk.toString();
-  });
+    const choice = response.choices?.[0];
+    if (!choice) {
+      addLog("Pas de reponse de Kimi");
+      break;
+    }
 
-  // Wait for process to exit
-  const exitCode = await new Promise((resolve) => {
-    child.on("close", (code) => resolve(code));
-    child.on("error", (err) => {
-      addLog(`Erreur spawn: ${err.message}`);
-      resolve(1);
-    });
-  });
+    const message = choice.message;
+    messages.push(message);
 
-  console.log(`[WORKER ${jobId}] Claude CLI exited with code ${exitCode}`);
+    // Log assistant text
+    if (message.content) {
+      const text = message.content.trim();
+      if (text) addLog(`Kimi: ${text.slice(0, 300)}`);
+    }
 
-  if (stderrBuffer.trim()) {
-    const lastStderr = stderrBuffer.trim().split("\n").slice(-5).join("\n");
-    console.error(`[WORKER ${jobId}] stderr: ${lastStderr}`);
+    const toolCalls = message.tool_calls || [];
+
+    // No more tool calls → Kimi is done
+    if (toolCalls.length === 0) {
+      addLog(`Pipeline termine (${iteration} tours)`);
+      break;
+    }
+
+    // Execute each tool call
+    for (const tc of toolCalls) {
+      const fnName = tc.function?.name;
+      let args = {};
+      try {
+        args = JSON.parse(tc.function?.arguments || "{}");
+      } catch (_) {}
+
+      let result = "";
+      if (fnName === "Bash") {
+        const cmd = args.command || "";
+        const shortCmd = cmd.length > 150 ? cmd.slice(0, 150) + "..." : cmd;
+        addLog(`Bash: ${shortCmd}`);
+
+        const progress = detectProgress(cmd);
+        if (progress && progress.progress > lastProgress) {
+          lastProgress = progress.progress;
+          updateStatus(progress);
+        }
+
+        result = execBash(cmd, args.timeout || 1800, toolEnv);
+      } else if (fnName === "Read") {
+        const fp = args.file_path || "";
+        addLog(`Read: ${fp}`);
+        result = await execRead(fp);
+      } else if (fnName === "Write") {
+        const fp = args.file_path || "";
+        addLog(`Write: ${fp} (${(args.content || "").length} chars)`);
+        result = execWrite(fp, args.content || "");
+      } else {
+        result = `ERROR: Unknown tool: ${fnName}`;
+      }
+
+      messages.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: String(result),
+      });
+    }
+  }
+
+  if (iteration >= MAX_ITERATIONS) {
+    addLog(`Limite d'iterations atteinte (${MAX_ITERATIONS})`);
   }
 
   // Collect outputs
   let outputs = [];
-
-  // Try reading outputs.json written by Claude
   if (fs.existsSync(outputsJsonPath)) {
     try {
       outputs = JSON.parse(fs.readFileSync(outputsJsonPath, "utf-8"));
@@ -619,7 +760,7 @@ async function main() {
     }
   }
 
-  // Fallback: scan output directory for video files
+  // Fallback: scan output dir
   if (outputs.length === 0 && fs.existsSync(outputDir)) {
     const files = fs.readdirSync(outputDir).filter(f =>
       /\.(mp4|mov|avi|mkv|webm|jpg|jpeg|png)$/i.test(f)
@@ -630,7 +771,6 @@ async function main() {
         label: f.replace(/\.[^.]+$/, "").replace(/[_-]/g, " "),
         description: "",
       }));
-      // Write manifest for consistency
       fs.writeFileSync(outputsJsonPath, JSON.stringify(outputs, null, 2));
       addLog(`Fallback: ${files.length} fichier(s) trouves dans output/`);
     }
@@ -649,17 +789,14 @@ async function main() {
     console.log(`[WORKER ${jobId}] Done! ${outputs.length} output(s)`);
     process.exit(0);
   } else {
-    const errorMsg = exitCode !== 0
-      ? `Claude CLI a quitte avec le code ${exitCode}. Verifiez que Claude est connecte (claude login).`
-      : "Aucun fichier produit. Le pipeline n'a pas genere de sortie.";
     updateStatus({
       status: "error",
       step: "Erreur",
       progress: 100,
-      message: errorMsg,
+      message: "Aucun fichier produit. Le pipeline n'a pas genere de sortie.",
       outputs: [],
     });
-    addLog(`Echec: ${errorMsg}`);
+    addLog("Echec: aucun fichier produit");
     process.exit(1);
   }
 }

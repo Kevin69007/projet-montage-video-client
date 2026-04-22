@@ -1,112 +1,105 @@
 # Installation — Montage Video
 
-Application web locale pour le montage video automatise avec Claude.
+Application web locale pour le montage video automatise avec l'IA Kimi (Moonshot AI).
 Deux modes : **Video** (montage, sous-titres, teasers) et **Miniature** (thumbnails IA style YouTube).
 
-**Un abonnement Claude (Max ou Pro) est requis.**
+**Aucun abonnement requis** — paie uniquement a l'utilisation via API.
 
 ---
 
-## Docker (recommande — Mac + Windows)
+## Installation (Mac + Windows)
 
-Tout est installe automatiquement : Node.js, Python, FFmpeg, Whisper, Claude CLI, nano-banana (miniatures IA).
+Tout est installe automatiquement dans le conteneur Docker : Node.js, Python, FFmpeg, Whisper, nano-banana (miniatures IA).
 
-### Ce qu'il faut installer
+### Ce qu'il faut installer sur ta machine
 
-1. **Docker Desktop** — https://www.docker.com/products/docker-desktop/
-   - Windows : WSL2 requis (Docker Desktop le propose a l'installation)
+**Une seule chose : Docker Desktop**
+- https://www.docker.com/products/docker-desktop/
+- Windows : necessite WSL2 (Docker Desktop le propose a l'installation)
 
-2. **Claude CLI** — pour l'authentification :
-   - Installe Node.js : https://nodejs.org/
-   - Puis dans un terminal :
-   ```bash
-   npm install -g @anthropic-ai/claude-code
-   claude login
-   ```
+### Cles API necessaires
 
-3. **Cle API Gemini** (gratuite, pour les miniatures IA) :
+Les deux sont demandees au premier lancement et sauvegardees dans `.env` :
+
+1. **Kimi API Key** (obligatoire — pour l'IA de montage)
+   - Va sur https://platform.moonshot.ai/
+   - Cree un compte, ajoute une methode de paiement
+   - Genere une cle API (format `sk-...`)
+   - Tarif : ~$0.035/job avec Kimi K2.5 (~5x moins cher que Claude Sonnet)
+
+2. **Gemini API Key** (optionnel — pour les miniatures IA)
    - Va sur https://aistudio.google.com/apikey
-   - Cree une cle — le script la demandera au premier lancement
+   - Cree une cle (gratuite)
+   - Si vide, les miniatures ne fonctionneront pas (mais le mode Video fonctionne)
 
 ### Lancer
 
 **Mac :** Double-clique `start.command`
 **Windows :** Double-clique `start.bat`
 
-Le script gere tout :
-- Rafraichit le token Claude (automatique sur Mac via le trousseau)
-- Demande la cle Gemini au premier lancement
-- Construit l'image Docker (~5-10 min la premiere fois)
-- Ouvre http://localhost:3000
+Le script fait tout automatiquement :
+1. Verifie que Docker est installe et demarre
+2. Demande la cle Kimi (premier lancement uniquement)
+3. Demande la cle Gemini (premier lancement uniquement)
+4. Construit l'image Docker (~5-10 min la premiere fois)
+5. Demarre le serveur et ouvre http://localhost:3000
 
 Les lancements suivants sont instantanes.
 
 ### Arreter
 
-Ctrl+C dans le terminal, ou `docker compose down`
+Ctrl+C dans le terminal, ou :
+```bash
+docker compose down
+```
 
-### Reconstruire (apres mise a jour)
+### Reconstruire (apres mise a jour du code)
 
 ```bash
 docker compose build --no-cache
 ```
 
-### Note Windows
+---
 
-Sur Windows, le token Claude ne peut pas etre extrait automatiquement du trousseau.
-Au premier lancement, `start.bat` te demandera de coller ton token manuellement :
-1. Lance `claude setup-token` dans un terminal
-2. Copie le token affiche
-3. Colle-le quand le script le demande
+## Modele Kimi — Configuration avancee
 
-### Depannage
+Par defaut, le worker utilise `kimi-k2.5`. Tu peux changer via `.env` :
+
+```
+KIMI_API_KEY=sk-...
+KIMI_MODEL=kimi-k2.5         # defaut — $0.60/M in, $2.50/M out
+# KIMI_MODEL=kimi-k2.6       # plus recent, ~60% plus cher ($0.95/M in, $4.00/M out)
+# KIMI_MODEL=kimi-k2-thinking  # reasoning, meme prix que K2.5
+# KIMI_MODEL=kimi-k2-turbo-preview  # rapide mais cher ($8/M out)
+```
+
+Tous les modeles ont un contexte de 256K tokens, largement suffisant.
+
+**Comparaison rapide :**
+
+| Modele | Input (cached) | Input (miss) | Output | Cas d'usage |
+|--------|----------------|--------------|--------|-------------|
+| kimi-k2.5 | $0.15/M | $0.60/M | $2.50/M | **Defaut** — bon rapport qualite/prix |
+| kimi-k2.6 | $0.16/M | $0.95/M | $4.00/M | Meilleure qualite pour taches complexes |
+| kimi-k2-thinking | $0.15/M | $0.60/M | $2.50/M | Raisonnement — taches analytiques |
+| kimi-k2-turbo-preview | $0.15/M | $1.15/M | $8.00/M | Reponses rapides, peu recommande |
+
+---
+
+## Depannage
 
 | Probleme | Solution |
 |----------|----------|
 | "Docker n'est pas installe" | Installe Docker Desktop |
 | "Docker n'est pas demarre" | Lance Docker Desktop |
-| Erreur d'authentification Claude | Relance `claude login` puis relance le script |
-| Build echoue | Verifie ta connexion internet, `docker compose build --no-cache` |
+| "KIMI_API_KEY non configuree" | Verifie que `.env` contient `KIMI_API_KEY=sk-...` |
+| Erreur API Kimi 401 | Cle API invalide — regenere-la sur platform.moonshot.ai |
+| Erreur API Kimi 402 | Credit insuffisant — ajoute un paiement sur platform.moonshot.ai |
+| Build Docker echoue | Verifie ta connexion internet, `docker compose build --no-cache` |
 | Port 3000 occupe | Change le port dans `docker-compose.yml` |
-| Miniatures basiques (pas IA) | Verifie que `GEMINI_API_KEY` est dans `.env` |
-| Transcription lente | Normal : ~1-3 min par minute de video |
-
----
-
-## Installation native (Mac uniquement, sans Docker)
-
-Pour ceux qui preferent ne pas utiliser Docker.
-
-```bash
-# Homebrew
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Node.js + Python + FFmpeg
-brew install node python3 ffmpeg
-
-# FFmpeg avec libass (pour les sous-titres ASS)
-brew tap homebrew-ffmpeg/ffmpeg
-brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-libass
-
-# Claude CLI
-npm install -g @anthropic-ai/claude-code
-claude login
-
-# Python deps
-pip3 install openai-whisper Pillow
-
-# Bun + nano-banana (miniatures IA)
-curl -fsSL https://bun.sh/install | bash
-git clone https://github.com/kingbootoshi/nano-banana-2-skill.git ~/tools/nano-banana-2
-cd ~/tools/nano-banana-2 && bun install && bun link
-mkdir -p ~/.nano-banana && echo "GEMINI_API_KEY=ta_cle_ici" > ~/.nano-banana/.env
-
-# Dependances Node du projet
-cd /chemin/vers/le/projet
-npm install
-```
-
-Lancer : double-clique `start-native.command` ou `npm run dev`
+| Miniatures basiques | Ajoute `GEMINI_API_KEY=...` dans `.env` |
+| Transcription lente | Normal : ~1-3 min par minute de video avec Whisper |
+| "Aucun fichier produit" | Verifie les logs dans la page de progression |
 
 ---
 
@@ -126,7 +119,7 @@ Lancer : double-clique `start-native.command` ou `npm run dev`
 2. Upload la video source (pour extraire les meilleures frames)
 3. Upload une **image de reference** (la miniature dont tu veux t'inspirer)
 4. Ecris ton prompt ("Miniature YouTube style gaming avec texte gros")
-5. Optionnel : texte a afficher, nombre de miniatures (defaut 2), couleur accent
+5. Optionnel : texte, format (16:9, 9:16, 1:1, 4:5, 4:3), nombre, couleur accent
 6. Clique "Generer les miniatures"
 7. Resultat : miniature 1 = fidele a la reference, miniature 2 = variante creative
 
@@ -136,32 +129,35 @@ Lancer : double-clique `start-native.command` ou `npm run dev`
 Interface web (localhost:3000)
        |
        v
-   worker.mjs — orchestre Claude CLI
+   worker.mjs — agent Kimi API
        |
        v
-   Claude (claude -p) — agent autonome
+   Kimi K2.5 (API Moonshot) — decide des outils
+       |
+       +-- Bash : ffmpeg, python scripts
+       +-- Read : fichiers, analyse images (via Kimi Vision)
+       +-- Write : outputs.json, fichiers
        |
        +-- Mode Video :
-       |     transcribe.py (Whisper) → ffmpeg (decoupe) →
-       |     burn_subtitles.py (sous-titres) → generate_text_frame.py →
-       |     ffmpeg (assemblage) → video finale
+       |     transcribe.py (Whisper) -> ffmpeg (decoupe) ->
+       |     burn_subtitles.py (sous-titres) -> generate_text_frame.py ->
+       |     ffmpeg (assemblage) -> video finale
        |
        +-- Mode Miniature :
-             ffmpeg (extraction frames) → nano-banana (generation IA Gemini) →
+             ffmpeg (extraction frames) -> nano-banana (Gemini) ->
              miniatures style reference
 ```
 
 ## Architecture
 
 ```
-start.command          <- Double-clic Mac (Docker)
-start.bat              <- Double-clic Windows (Docker)
-start-native.command   <- Double-clic Mac (sans Docker)
+start.command          <- Double-clic Mac
+start.bat              <- Double-clic Windows
 Dockerfile             <- Image Docker (Node, Python, FFmpeg, Whisper, Bun, nano-banana)
 docker-compose.yml     <- Config Docker
-.env                   <- Tokens Claude + Gemini (gitignore)
+.env                   <- Cles Kimi + Gemini (gitignore)
 app/                   <- Interface web Next.js
-worker.mjs             <- Orchestre Claude CLI
+worker.mjs             <- Agent Kimi API (boucle tool_calls)
 pipeline/
   scripts/             <- Python (transcribe, burn_subtitles, text_frame, generate_thumbnail)
   fonts/               <- BigShoulders, InstrumentSans, PlayfairDisplay
