@@ -80,11 +80,11 @@ function OutputCard({
 
       {/* Video player */}
       {isVideo && (
-        <div className="bg-black">
+        <div className="bg-black flex items-center justify-center">
           <video
             src={url}
             controls
-            className="w-full max-h-[500px] mx-auto"
+            className="max-h-[80vh] max-w-full w-auto mx-auto block"
             preload="metadata"
           />
         </div>

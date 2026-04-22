@@ -665,6 +665,7 @@ async function main() {
 
   let lastProgress = 5;
   let iteration = 0;
+  const usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
 
   // Agentic loop
   while (iteration < MAX_ITERATIONS) {
@@ -678,6 +679,13 @@ async function main() {
       addLog(`Erreur Kimi API: ${err.message}`);
       writeError(`Kimi API: ${err.message}`);
       process.exit(1);
+    }
+
+    // Track token usage
+    if (response.usage) {
+      usage.input_tokens += response.usage.prompt_tokens || 0;
+      usage.output_tokens += response.usage.completion_tokens || 0;
+      usage.total_tokens += response.usage.total_tokens || 0;
     }
 
     const choice = response.choices?.[0];
@@ -776,6 +784,27 @@ async function main() {
     }
   }
 
+  // Compute estimated cost (Kimi K2.5 pricing — miss rate approx)
+  const PRICING = {
+    "kimi-k2.5": { input: 0.60, output: 2.50 },
+    "kimi-k2.6": { input: 0.95, output: 4.00 },
+    "kimi-k2-thinking": { input: 0.60, output: 2.50 },
+    "kimi-k2-turbo-preview": { input: 1.15, output: 8.00 },
+    "kimi-k2-thinking-turbo": { input: 1.15, output: 8.00 },
+  };
+  const rate = PRICING[KIMI_MODEL] || PRICING["kimi-k2.5"];
+  const estCost = (usage.input_tokens / 1_000_000) * rate.input + (usage.output_tokens / 1_000_000) * rate.output;
+
+  const tokenSummary = {
+    model: KIMI_MODEL,
+    input: usage.input_tokens,
+    output: usage.output_tokens,
+    total: usage.total_tokens,
+    estimated_cost_usd: Math.round(estCost * 10000) / 10000,
+  };
+
+  addLog(`Tokens — in: ${usage.input_tokens}, out: ${usage.output_tokens}, total: ${usage.total_tokens} (~$${tokenSummary.estimated_cost_usd})`);
+
   // Final status
   if (outputs.length > 0) {
     updateStatus({
@@ -784,6 +813,7 @@ async function main() {
       progress: 100,
       message: `${outputs.length} fichier(s) produit(s)`,
       outputs,
+      tokens: tokenSummary,
     });
     addLog("Pipeline termine avec succes");
     console.log(`[WORKER ${jobId}] Done! ${outputs.length} output(s)`);
@@ -795,6 +825,7 @@ async function main() {
       progress: 100,
       message: "Aucun fichier produit. Le pipeline n'a pas genere de sortie.",
       outputs: [],
+      tokens: tokenSummary,
     });
     addLog("Echec: aucun fichier produit");
     process.exit(1);

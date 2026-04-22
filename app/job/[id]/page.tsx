@@ -84,6 +84,34 @@ export default function JobPage() {
               outputs={status.outputs}
               message={status.message}
             />
+
+            {/* Token usage */}
+            {status.tokens && (
+              <div className="mt-8">
+                <label className="mono-label block mb-2">Usage Kimi</label>
+                <div className="glass-card p-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                    <div>
+                      <p className="mono-label text-[10px] opacity-60">Modele</p>
+                      <p className="text-sm font-mono text-text-primary mt-1">{status.tokens.model}</p>
+                    </div>
+                    <div>
+                      <p className="mono-label text-[10px] opacity-60">Input tokens</p>
+                      <p className="text-sm font-mono text-text-primary mt-1">{status.tokens.input.toLocaleString()}</p>
+                    </div>
+                    <div>
+                      <p className="mono-label text-[10px] opacity-60">Output tokens</p>
+                      <p className="text-sm font-mono text-text-primary mt-1">{status.tokens.output.toLocaleString()}</p>
+                    </div>
+                    <div>
+                      <p className="mono-label text-[10px] opacity-60">Cout estime</p>
+                      <p className="text-sm font-mono text-purple-light mt-1">${status.tokens.estimated_cost_usd.toFixed(4)}</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {status.log.length > 0 && (
               <div className="mt-8">
                 <label className="mono-label block mb-2">Log</label>

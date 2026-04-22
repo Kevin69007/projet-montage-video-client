@@ -81,6 +81,13 @@ export interface JobStatus {
   message: string;
   outputs: { file: string; label: string; description: string }[];
   log: string[];
+  tokens?: {
+    model: string;
+    input: number;
+    output: number;
+    total: number;
+    estimated_cost_usd: number;
+  };
 }
 
 export async function getJobStatus(jobId: string): Promise<JobStatus> {
