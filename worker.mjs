@@ -594,7 +594,7 @@ async function callKimi(messages) {
       model: KIMI_MODEL,
       messages,
       tools: TOOLS,
-      temperature: 0.3,
+      temperature: 1,
       max_tokens: 4000,
     }),
   });
