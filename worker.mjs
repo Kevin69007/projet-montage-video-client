@@ -391,8 +391,9 @@ function buildMiniaturePrompt(params, videoPaths, workDir, outputDir, outputsJso
 ## Fichiers
 - Video(s) source (pour extraire des frames) :
 ${videoList}
-- Image de reference : ${referenceFile}
-  (tu la vois directement dans ce message — analyse-la visuellement)
+${referenceFile
+    ? `- Image de reference : ${referenceFile}\n  (tu la vois directement dans ce message — analyse-la visuellement)`
+    : `- Image de reference : AUCUNE (aucune image reference fournie — genere les miniatures en t'inspirant du prompt utilisateur uniquement)`}
 - Repertoire de travail (frames) : ${workDir}
 - Repertoire de sortie : ${outputDir}
 - Manifest a ecrire : ${outputsJsonPath}
@@ -953,27 +954,45 @@ Apres le Write, reponds juste "Termine" sans autre appel d'outil.`,
 
       let result = "";
       if (fnName === "Bash") {
-        const cmd = args.command || "";
-        const shortCmd = cmd.length > 150 ? cmd.slice(0, 150) + "..." : cmd;
-        addLog(`Bash: ${shortCmd}`);
-        const progress = detectProgress(cmd);
-        if (progress && progress.progress > lastProgress) {
-          lastProgress = progress.progress;
-          updateStatus(progress);
+        const cmd = (args.command || "").trim();
+        if (!cmd) {
+          result = "ERROR: Bash called with empty command. Fournis un champ 'command' non-vide.";
+        } else {
+          const shortCmd = cmd.length > 150 ? cmd.slice(0, 150) + "..." : cmd;
+          addLog(`Bash: ${shortCmd}`);
+          const progress = detectProgress(cmd);
+          if (progress) {
+            // Step label updates immediately; progress bar stays monotonic
+            const newProgress = Math.max(lastProgress, progress.progress);
+            lastProgress = newProgress;
+            updateStatus({ step: progress.step, progress: newProgress, message: progress.message });
+          }
+          result = execBash(cmd, args.timeout || 1800, toolEnv);
         }
-        result = execBash(cmd, args.timeout || 1800, toolEnv);
       } else if (fnName === "Read") {
         const fp = args.file_path || "";
-        addLog(`Read: ${fp}`);
-        result = await execRead(fp);
+        if (!fp) {
+          result = "ERROR: Read called without file_path.";
+        } else {
+          addLog(`Read: ${fp}`);
+          result = await execRead(fp);
+        }
       } else if (fnName === "Write") {
         const fp = args.file_path || "";
-        const contentLen = (args.content || "").length;
-        addLog(`Write: ${fp} (${contentLen} chars)`);
-        result = execWrite(fp, args.content || "");
-        // Detect outputs.json write for progress
-        if (fp === outputsJsonPath) {
-          updateStatus({ step: "Sauvegarde", progress: 95, message: "outputs.json ecrit..." });
+        if (!fp) {
+          result = "ERROR: Write called without file_path.";
+        } else if (typeof args.content !== "string") {
+          result = "ERROR: Write called without string 'content' argument.";
+        } else {
+          const contentLen = args.content.length;
+          addLog(`Write: ${fp} (${contentLen} chars)`);
+          result = execWrite(fp, args.content);
+          // Detect outputs.json write for progress
+          if (fp === outputsJsonPath) {
+            const newProgress = Math.max(lastProgress, 95);
+            lastProgress = newProgress;
+            updateStatus({ step: "Sauvegarde", progress: newProgress, message: "outputs.json ecrit..." });
+          }
         }
       } else {
         result = `ERROR: Unknown tool: ${fnName}`;
@@ -1000,6 +1019,14 @@ Apres le Write, reponds juste "Termine" sans autre appel d'outil.`,
     try {
       outputs = JSON.parse(fs.readFileSync(outputsJsonPath, "utf-8"));
       if (!Array.isArray(outputs)) outputs = [outputs];
+      // Normalize entries: ensure file/label/description are always strings
+      outputs = outputs
+        .filter(e => e && typeof e.file === "string" && e.file.length > 0)
+        .map(e => ({
+          file: e.file,
+          label: (typeof e.label === "string" && e.label.trim()) || e.file.replace(/\.[^.]+$/, "").replace(/[_-]/g, " "),
+          description: typeof e.description === "string" ? e.description : "",
+        }));
       addLog(`Manifeste trouve: ${outputs.length} fichier(s)`);
     } catch (e) {
       addLog(`Erreur lecture outputs.json: ${e.message}`);
