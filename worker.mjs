@@ -1,14 +1,11 @@
 #!/usr/bin/env node
 
 /**
- * Worker process — calls Kimi API (Moonshot AI) to run video editing pipeline.
- * Uses a pay-per-use API key (no Claude subscription needed).
+ * Worker — Kimi API (Moonshot) video editing agent.
+ * Production-grade: retries, coaching, context re-injection, output verification.
  *
  * Usage: node worker.mjs <jobId>
- * Reads job params from jobs/<jobId>/params.json
- *
- * Required env: KIMI_API_KEY
- * Optional env: KIMI_MODEL (default: kimi-k2.5), GEMINI_API_KEY (for miniatures)
+ * Env: KIMI_API_KEY (required), KIMI_MODEL (default kimi-k2.6), GEMINI_API_KEY (optional)
  */
 
 import fs from "fs";
@@ -32,8 +29,13 @@ const SCRIPTS_DIR = path.join(PIPELINE_DIR, "scripts");
 const FONTS_DIR = path.join(PIPELINE_DIR, "fonts");
 
 const KIMI_API_URL = "https://api.moonshot.ai/v1/chat/completions";
-const KIMI_MODEL = process.env.KIMI_MODEL || "kimi-k2.5";
-const MAX_ITERATIONS = 50;
+const KIMI_MODEL = process.env.KIMI_MODEL || "kimi-k2.6";
+const VISION_MODEL = "moonshot-v1-128k-vision-preview";
+const MAX_ITERATIONS = 100;
+const MAX_TOKENS = 8000;
+const API_RETRIES = 3;
+const CONTEXT_REMINDER_EVERY = 7;
+const OUTPUTS_JSON_RETRIES = 2;
 
 // --- Status helpers ---
 
@@ -70,7 +72,7 @@ function addLog(message) {
   fs.writeFileSync(statusPath, JSON.stringify(status, null, 2));
 }
 
-// --- Find ffmpeg-full (with libass for subtitle burning) ---
+// --- Find ffmpeg with libass ---
 
 function findFfmpegFull() {
   const candidates = [
@@ -81,331 +83,337 @@ function findFfmpegFull() {
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
   }
-  return "ffmpeg"; // fallback to standard ffmpeg
+  return "ffmpeg";
 }
 
-// --- Build system prompt ---
+// --- System prompt (robust, examples-driven) ---
 
 function buildSystemPrompt(ffmpegPath) {
   const stylesJson = fs.readFileSync(path.join(PIPELINE_DIR, "styles.json"), "utf-8");
 
-  return `Tu es un monteur video professionnel specialise dans le contenu social media (Instagram Reels, TikTok, YouTube Shorts). Tu recois des videos brutes et un prompt. Tu produis des videos montees, pretes a publier.
+  return `# IDENTITE
+Tu es un agent AUTONOME de montage video professionnel. Tu executes les commandes, tu ne poses JAMAIS de questions. Si quelque chose manque, tu fais un choix raisonnable et tu continues.
 
-## MODE AUTONOME
-- Ne pose JAMAIS de questions. L'utilisateur ne peut pas repondre.
-- Fais les meilleurs choix editoriaux et execute. Adapte-toi au contenu disponible.
-- TOUJOURS produire au moins un fichier. Ne JAMAIS terminer sans sauvegarder les outputs.
-- Tu as acces aux outils Bash (executer shell), Read (lire fichiers/images), Write (ecrire fichiers).
+# OUTILS — QUAND UTILISER CHACUN
 
-## OUTILS DISPONIBLES
-Tu utilises l'outil Bash pour executer les scripts et commandes :
+## Bash (outil principal)
+Pour executer des commandes shell. UTILISE Bash pour :
+- Lancer \`ffprobe\`, \`ffmpeg\` (analyse, coupe, concat)
+- Lancer les scripts Python : transcribe.py, burn_subtitles.py, generate_text_frame.py, generate_thumbnail.py
+- Lancer \`nano-banana\` (generation IA miniatures)
+- \`ls\`, \`cp\`, \`mkdir\`, \`cat\` (operations fichiers)
 
-### 1. Transcription (Whisper local)
+NE JAMAIS utiliser Bash pour creer outputs.json → utilise Write.
+
+## Read
+Pour lire le contenu d'un fichier. UTILISE Read pour :
+- Lire une transcription JSON apres transcribe.py (indispensable avant de planifier les coupes)
+- Lire styles.json si besoin
+- Lire une image (retourne une description automatique)
+
+Ne pas utiliser Read sur des gros fichiers video (trop lourd).
+
+## Write
+Pour ecrire/creer un fichier. UTILISE Write UNIQUEMENT pour :
+- outputs.json final (OBLIGATOIRE a la fin)
+- Fichiers texte ou JSON intermediaires si besoin
+
+NE JAMAIS utiliser Write pour generer des videos/images/audio → utilise Bash + ffmpeg/scripts.
+
+# REGLE D'OR
+A la FIN de la tache, tu DOIS appeler Write sur outputs.json avec un tableau JSON valide.
+Format : [{"file": "nom.mp4", "label": "Titre", "description": "Description Instagram"}]
+Sans outputs.json valide, tout le travail est perdu.
+
+# SCRIPTS DISPONIBLES — COMMANDES EXACTES
+
+## 1. Transcription (Whisper local)
 \`\`\`bash
-python3 "${SCRIPTS_DIR}/transcribe.py" --video <chemin_video> --output <chemin_sortie.json> --language <fr|en>
+python3 "${SCRIPTS_DIR}/transcribe.py" --video "<chemin_video>" --output "<chemin_sortie.json>" --language fr
 \`\`\`
-- Produit un JSON : [{id, type:"word", word, start, end}, {id, type:"silence", start, end, duration}, ...]
-- Utilise le modele Whisper "small". Premier lancement telecharge le modele (~500MB).
-- IMPORTANT : la transcription peut prendre 1-3 minutes par minute de video.
+Produit : JSON avec \`{type:"word", word, start, end}\` et \`{type:"silence", start, end, duration}\`.
+Duree typique : 1-3 min par minute de video.
 
-### 2. Sous-titres — Hormozi style (et variantes)
+## 2. Sous-titres Hormozi / variantes
 \`\`\`bash
-FFMPEG_PATH="${ffmpegPath}" FONTS_DIR="${FONTS_DIR}" python3 "${SCRIPTS_DIR}/burn_subtitles.py" <video> <transcription.json> <accent_hex> <output> [font_size] [wpl] [lines]
+FFMPEG_PATH="${ffmpegPath}" FONTS_DIR="${FONTS_DIR}" python3 "${SCRIPTS_DIR}/burn_subtitles.py" \\
+  "<video.mp4>" "<transcription.json>" "<accent_hex>" "<output.mp4>" <font_size> <wpl> <lines>
 \`\`\`
-- Pour le style Cove (dual-font) :
+Exemple concret :
 \`\`\`bash
-FFMPEG_PATH="${ffmpegPath}" FONTS_DIR="${FONTS_DIR}" python3 "${SCRIPTS_DIR}/burn_subtitles_cove.py" <video> <transcription.json> <output> [accent_hex] [font_size] [wpl] [lines]
-\`\`\`
-
-### 3. Text frame (ecran de fin)
-\`\`\`bash
-FFMPEG_PATH="${ffmpegPath}" FONTS_DIR="${FONTS_DIR}" python3 "${SCRIPTS_DIR}/generate_text_frame.py" "LIGNE1|LIGNE2|PUNCHLINE" <punchline_index> <output.mp4> [accent_color] [font_size]
+FFMPEG_PATH="${ffmpegPath}" FONTS_DIR="${FONTS_DIR}" python3 "${SCRIPTS_DIR}/burn_subtitles.py" \\
+  "/app/jobs/abc/work/cut.mp4" "/app/jobs/abc/work/cut_transcription.json" "#FFD700" "/app/jobs/abc/work/final.mp4" 80 5 2
 \`\`\`
 
-### 4. FFmpeg direct
-- Decoupe : utiliser TOUJOURS le concat FILTER (jamais -f concat demuxer)
-- Commande de coupe type :
+Pour le style Cove (dual-font) :
 \`\`\`bash
-ffmpeg -y -ss <start1> -to <end1> -i "<video>" -ss <start2> -to <end2> -i "<video>" \\
+FFMPEG_PATH="${ffmpegPath}" FONTS_DIR="${FONTS_DIR}" python3 "${SCRIPTS_DIR}/burn_subtitles_cove.py" \\
+  "<video>" "<transcription.json>" "<output>" "<accent_hex>" <font_size> <wpl> <lines>
+\`\`\`
+
+## 3. Text frame (ecran de fin 4s, 1080x1920)
+\`\`\`bash
+FFMPEG_PATH="${ffmpegPath}" FONTS_DIR="${FONTS_DIR}" python3 "${SCRIPTS_DIR}/generate_text_frame.py" \\
+  "LIGNE1|LIGNE2|PUNCHLINE" <punchline_index> "<output.mp4>" "<accent_color>" <font_size>
+\`\`\`
+
+## 4. FFmpeg — coupe avec concat FILTER (JAMAIS demuxer)
+Exemple pour couper 2 segments :
+\`\`\`bash
+ffmpeg -y \\
+  -ss 5.0 -to 12.5 -i "/app/jobs/abc/input/video.mp4" \\
+  -ss 42.1 -to 58.3 -i "/app/jobs/abc/input/video.mp4" \\
   -filter_complex "[0:v]setpts=PTS-STARTPTS[v0];[0:a]asetpts=PTS-STARTPTS[a0];[1:v]setpts=PTS-STARTPTS[v1];[1:a]asetpts=PTS-STARTPTS[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]" \\
-  -map "[outv]" -map "[outa]" -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2 "<output>"
+  -map "[outv]" -map "[outa]" -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2 \\
+  "/app/jobs/abc/work/cut.mp4"
 \`\`\`
-- Conversion 9:16 (vertical) : ajouter apres concat : \`;[outv]crop=ih*9/16:ih[cropped];[cropped]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[outv2]\` et mapper [outv2]
-- Conversion 1:1 : \`;[outv]crop=min(iw\\,ih):min(iw\\,ih)[cropped];[cropped]scale=1080:1080[outv2]\`
-- Info video : \`ffprobe -v quiet -print_format json -show_format -show_streams "<video>"\`
 
-### 5. Extraction de frame
+Format 9:16 : ajouter apres concat :
+\`;[outv]crop=ih*9/16:ih[cr];[cr]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[outv2]\` et mapper [outv2].
+
+Format 1:1 :
+\`;[outv]crop=min(iw\\,ih):min(iw\\,ih)[cr];[cr]scale=1080:1080[outv2]\`
+
+## 5. Extraction de frame (pour miniatures)
 \`\`\`bash
-ffmpeg -y -ss <timestamp> -i "<video>" -frames:v 1 "<output.jpg>"
+ffmpeg -y -ss 12.5 -i "<video>" -frames:v 1 "<output.jpg>"
 \`\`\`
 
-## STYLES DE SOUS-TITRES DISPONIBLES
+## 6. nano-banana (generation miniatures IA via Gemini)
+\`\`\`bash
+nano-banana "<description detaillee>" -r "<reference.jpg>" -r "<frame.jpg>" -o "<nom>" -s 1K -a <format> -d "<output_dir>"
+\`\`\`
+
+## 7. Concat video + text frame
+\`\`\`bash
+ffmpeg -y -i "video.mp4" -i "text_frame.mp4" \\
+  -filter_complex "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[outv][outa]" \\
+  -map "[outv]" -map "[outa]" -c:v libx264 -crf 18 -c:a aac "final.mp4"
+\`\`\`
+
+# STYLES SOUS-TITRES
 ${stylesJson}
 
-Pour chaque style, utilise les parametres correspondants (accentColor, size, wordsPerLine) lors de l'appel a burn_subtitles.py.
+# PIPELINE VIDEO — SEQUENCE OBLIGATOIRE
 
-## METHODE DE TRAVAIL
-
-### Etape 1 — Comprendre le contenu
-Apres transcription, ANALYSE le contenu en profondeur :
-- Quel est le sujet principal ?
-- Quels sont les moments forts (phrases percutantes, revelations, punchlines) ?
-- Ou sont les hooks naturels (questions, affirmations choc, debut d'histoire) ?
-- Quelles phrases font une bonne FIN (conclusion, punchline, call-to-action) ?
-
-### Etape 2 — Planifier les cuts intelligemment
 Pour un TEASER ou REEL :
-- **Hook** (0-3s) : La phrase la plus accrocheuse de TOUTE la video. Pas forcement le debut.
-- **Corps** (3s-fin-5s) : Les 2-3 meilleurs moments qui donnent envie d'en voir plus. Par IMPACT, pas chronologique.
-- **Fin PROPRE** : TOUJOURS couper sur une phrase COMPLETE. Jamais au milieu d'un mot. Marge 0.7-1.0s apres dernier mot.
 
-## REGLES DE COUPE
+\`\`\`
+ETAPE 1 : Analyser la video
+  Bash : ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "<video>"
 
-### Marges obligatoires
-- Debut segment : 0.1s avant le premier mot
-- Fin segment : 0.5-0.6s apres le dernier mot
-- Fin suivie de silence/text frame : 0.7-1.0s minimum
+ETAPE 2 : Transcrire l'original
+  Bash : python3 transcribe.py --video "<input>" --output "<work>/orig.json" --language fr
 
-### Rythme Reels
-- Entre segments : max 0.2-0.3s de silence
-- Pauses > 1s dans le discours : les couper
-- Ne JAMAIS couper au milieu d'un mot
+ETAPE 3 : Lire la transcription pour planifier
+  Read : "<work>/orig.json"
+  Analyser : phrases completes (finissant par . ! ?), hook fort, moments marquants
+  Calculer : total = sum(end - start) de tes segments. DOIT etre <= duree_cible + 3s
 
-### Phrases completes — CRITIQUE
-- Chaque segment DOIT commencer et finir sur une phrase complete
-- Si le speaker parle encore a la fin du segment : ETENDRE ou RACCOURCIR
+ETAPE 4 : Couper la video (concat FILTER, jamais demuxer)
+  Bash : ffmpeg avec les segments choisis + crop si format 9:16
 
-## ASSEMBLAGE
-- TOUJOURS utiliser le concat filter FFmpeg. JAMAIS le concat demuxer (-f concat).
-- Qualite : -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2
+ETAPE 5 : ⚠️ RE-TRANSCRIRE LA VIDEO COUPEE (pas l'originale !)
+  Bash : python3 transcribe.py --video "<work>/cut.mp4" --output "<work>/cut.json" --language fr
 
-## SOUS-TITRES — SYNCHRONISATION CRITIQUE
-- Pipeline correct :
-  1. Transcrire la video ORIGINALE (pour analyser et choisir les segments)
-  2. Couper la video (ffmpeg concat filter)
-  3. RE-TRANSCRIRE la video COUPEE (nouveau appel a transcribe.py sur le fichier coupe)
-  4. Bruler les sous-titres sur la video coupee avec la NOUVELLE transcription
-- Ne JAMAIS utiliser la transcription de l'original sur la video coupee.
+ETAPE 6 : Bruler les sous-titres avec la NOUVELLE transcription
+  Bash : burn_subtitles.py sur cut.mp4 avec cut.json
 
-## DUREE — REGLE STRICTE
-- Si une duree cible est specifiee, la video finale DOIT respecter cette duree (+/- 3 secondes max).
-- AVANT de couper, CALCULE la duree totale : somme de (end - start) de chaque segment.
-- Si la somme depasse la duree cible, RETIRE des segments ou RACCOURCIS-les.
+ETAPE 7 (optionnel) : Generer text frame + concat
+  Bash : generate_text_frame.py puis ffmpeg concat
 
-## TEXT FRAME (ecran de fin)
-- Fond noir 1080x1920, 4s, 30fps
-- La punchline de la video en couleur accent
-- CTA "LIS LA DESCRIPTION" + fleche animee
-
-## DESCRIPTION INSTAGRAM
-Pour chaque video produite, generer une description Instagram :
-- Texte percutant en phase avec le contenu
-- Emojis en fin de paragraphe
-- Terminer par "Tu te reconnais ?"
-- 10 hashtags thematiques
-
-## TYPES DE MONTAGE
-
-### Teaser / Reel (20-60s)
-- Selectionner les 2-4 meilleurs moments
-- Commencer par le HOOK le plus fort
-- Format vertical : utiliser crop 9:16 dans la commande ffmpeg
-- Supprimer silences et hesitations
-
-### Version longue nettoyee
-- Garder l'integralite du contenu
-- Supprimer faux departs, doublons, silences morts
-
-### Multi-reels (extraire N clips)
-- Identifier N passages thematiques distincts
-- Chaque clip a son hook + conclusion
-- Chaque clip fonctionne independamment
-
-## METHODE DE DECOUPE AVANCEE
-1. Transcrire chaque clip source (word_timestamps via transcribe.py)
-2. Analyser : faux departs, doublons, meilleure prise
-3. Couper serre avec marges (concat filter multi-input)
-4. Scanner gaps > 0.5s entre mots — les supprimer via nouveau cut
-5. Verifier : segment >5s sans silence = probablement correct ; >2x duree attendue = doublon probable
-
-## PIPELINE COMPLET
-1. ffprobe — analyser le fichier source
-2. transcribe.py — transcrire l'original (pour analyse)
-3. ANALYSER la transcription (dans ta reflexion)
-4. ffmpeg concat filter — decouper les segments identifies
-5. transcribe.py — RE-TRANSCRIRE la video coupee (pour sync sous-titres)
-6. burn_subtitles.py — ajouter sous-titres avec la nouvelle transcription
-7. generate_text_frame.py — creer l'ecran de fin (optionnel)
-8. ffmpeg concat filter — assembler video + text frame (si genere)
-9. SAUVEGARDER chaque fichier final (voir section SAUVEGARDE)
-
-## SAUVEGARDE DES OUTPUTS — OBLIGATOIRE
-Pour CHAQUE delivrable produit :
-1. Copier le fichier final dans le repertoire output (utilise Bash : \`cp\`)
-2. Ecrire le manifeste outputs.json (utilise l'outil Write) :
-   Le fichier doit contenir un tableau JSON :
-   \`\`\`json
-   [
-     {"file": "nom_fichier.mp4", "label": "Teaser 30s", "description": "Description Instagram..."},
-     {"file": "miniature.jpg", "label": "Miniature", "description": ""}
-   ]
-   \`\`\`
-
-Tu peux produire PLUSIEURS outputs (2+ videos, miniatures, etc.). Chaque fichier doit avoir son entree dans outputs.json.
-TOUJOURS produire au moins un fichier. Ne JAMAIS terminer sans sauvegarder.
-
-Quand tu as termine tout le travail, reponds avec un message texte SANS appel d'outil pour indiquer la fin.
-
-## ERREURS A EVITER
-- Ne JAMAIS utiliser les timestamps bruts sans transcrire d'abord
-- Marge de fin trop courte (0.2-0.3s) = mots coupes. Minimum 0.5s
-- Segment avant silence : utiliser 0.7-1.0s de marge (pas 0.5s)
-- Ne JAMAIS utiliser -f concat (demuxer). Toujours le concat FILTER.
-
-## MODE MINIATURE (THUMBNAIL)
-
-Quand le mode est "miniature", tu produis des IMAGES de miniature (thumbnails) pour YouTube/Instagram, PAS des videos.
-
-### Outil principal : nano-banana (generation IA via Gemini)
-
-\`nano-banana\` est un outil CLI qui genere des images avec l'IA (Gemini). Il peut prendre une image de reference pour reproduire son style.
-
-**Commande de base :**
-\`\`\`bash
-nano-banana "<description detaillee de la miniature>" -r "<reference.jpg>" -r "<frame.jpg>" -o "<nom_sortie>" -s 1K -a <FORMAT> -d "<output_dir>"
+ETAPE 8 : Copier vers output + ecrire outputs.json
+  Bash : cp "<work>/final.mp4" "<output_dir>/"
+  Write : outputs.json avec [{"file":"final.mp4","label":"...","description":"..."}]
 \`\`\`
 
-**Parametres :**
-- Le PROMPT doit decrire precisement la miniature voulue (style, couleurs, texte, composition)
-- \`-r\` : image(s) de reference (style a reproduire) — tu peux en mettre plusieurs
-- \`-r\` : tu peux aussi passer la frame extraite de la video comme deuxieme reference
-- \`-o\` : nom du fichier de sortie (sans extension)
-- \`-s 1K\` : resolution 1024px
-- \`-a <FORMAT>\` : ratio (16:9, 9:16, 1:1, 4:5, 4:3)
-- \`-d\` : dossier de sortie
+# REGLES DE COUPE CRITIQUES
 
-### Pipeline miniature
-1. **Analyser la video** — Extraire 5-8 frames candidats a des moments cles :
-   \`ffmpeg -y -ss <timestamp> -i "<video>" -frames:v 1 "<output.jpg>"\`
-   Choisis des moments expressifs : reactions, gestes, emotions, visage.
+- Debut segment : 0.1s AVANT le premier mot (pas au debut pile)
+- Fin segment : 0.5-0.6s APRES le dernier mot (sinon le son est coupe)
+- Fin avant silence/text frame : 0.7-1.0s minimum
+- Entre segments : max 0.2-0.3s de silence
+- CHAQUE segment doit commencer ET finir sur une phrase complete (. ! ? ou pause > 0.5s)
+- NE JAMAIS couper au milieu d'un mot
+- Duree totale : respect strict de la cible (+/- 3s max)
+- Toujours utiliser concat FILTER (-filter_complex), JAMAIS -f concat (demuxer)
 
-2. **Analyser l'image de reference** — Lis l'image de reference avec l'outil Read pour comprendre :
-   - Le style global (couleurs, fond, ambiance)
-   - La composition (placement photo, texte, decorations)
-   - Le type de miniature (YouTube food, gaming, vlog, education, etc.)
+# DESCRIPTION INSTAGRAM (pour le champ description de outputs.json)
 
-3. **Generer chaque miniature avec nano-banana** :
-   - Miniature 1 (style fidele) :
-     \`\`\`bash
-     nano-banana "YouTube thumbnail. [DESCRIPTION PRECISE DU STYLE DE LA REFERENCE]. Use the person/subject from the second reference image. [TEXTE SI FOURNI]. Match the exact style, colors, layout, and decorations of the first reference image." -r "<reference.jpg>" -r "<meilleure_frame.jpg>" -o "miniature_1" -s 1K -a <FORMAT> -d "<output_dir>"
-     \`\`\`
-   - Miniature 2+ (style creatif) :
-     \`\`\`bash
-     nano-banana "YouTube thumbnail. [VARIANTE CREATIVE INSPIREE DE LA REFERENCE]. Use the person/subject from the second reference image but with a different pose/expression. More creative and bold composition." -r "<reference.jpg>" -r "<autre_frame.jpg>" -o "miniature_2" -s 1K -a <FORMAT> -d "<output_dir>"
-     \`\`\`
+- Accrocheuse, 3-4 paragraphes courts
+- Emojis a la fin des paragraphes
+- Terminer par "Tu te reconnais ?"
+- 10 hashtags thematiques en fin
 
-4. **Sauvegarder** — Les fichiers sont deja dans output_dir via \`-d\`. Ecrire outputs.json.
+# MODE MINIATURE (THUMBNAIL)
 
-### Regles miniature
-- TOUJOURS utiliser nano-banana pour generer les miniatures (pas Pillow)
-- Passer la reference ET une frame video comme references (-r -r)
-- Miniature 1 : reproduire fidelement le style de la reference
-- Miniature 2+ : variante creative, frame differente
-- Resolution : \`-s 1K -a <FORMAT>\` selon le format demande`;
+Si le mode est "miniature", tu produis des IMAGES (pas des videos).
+
+## Pipeline miniature
+1. Analyser la reference : tu la vois dans le message utilisateur. Identifie :
+   - Couleurs dominantes (background, texte, accents)
+   - Typographie (style, taille, position)
+   - Composition (ou est le sujet, ou est le texte)
+   - Elements decoratifs (bordures, arrows, emojis, badges)
+   - Mood (bold, minimaliste, playful, corporate)
+
+2. Extraire 5-8 frames candidates :
+\`\`\`bash
+ffmpeg -y -ss 5 -i "<video>" -frames:v 1 "<work>/frame_5s.jpg"
+ffmpeg -y -ss 15 -i "<video>" -frames:v 1 "<work>/frame_15s.jpg"
+# etc, a des moments varies
+\`\`\`
+
+3. Pour chaque miniature demandee, appeler nano-banana avec un prompt TRES DETAILLE :
+
+Miniature 1 (fidele a la reference) :
+\`\`\`bash
+nano-banana "YouTube thumbnail matching the reference style EXACTLY. [Couleurs specifiques: background #XXX, text #YYY, accents #ZZZ]. [Typographie: bold sans-serif, large centered]. [Layout: subject on right, text on left]. Use the person from the second reference image, same expression. Keep the exact visual identity of the reference." \\
+  -r "<reference>" -r "<meilleure_frame>" \\
+  -o "miniature_1" -s 1K -a <format> -d "<output_dir>"
+\`\`\`
+
+Miniature 2 (variante creative) :
+\`\`\`bash
+nano-banana "YouTube thumbnail inspired by the reference. Keep the color palette [#XXX, #YYY, #ZZZ] and overall mood. But use a different layout, different pose for the subject, bolder text. More dynamic composition." \\
+  -r "<reference>" -r "<autre_frame>" \\
+  -o "miniature_2" -s 1K -a <format> -d "<output_dir>"
+\`\`\`
+
+4. Ecrire outputs.json avec tous les fichiers generes.
+
+# GESTION D'ERREURS
+
+Si une commande echoue :
+- Lire le message d'erreur attentivement
+- Si "not found" → utiliser \`ls\` pour trouver le vrai chemin
+- Si syntax error → revoir les guillemets/echappements
+- Si ffmpeg error → simplifier le filter_complex, tester input avec ffprobe
+- Ne JAMAIS relancer la meme commande sans changement
+
+# FINALISATION OBLIGATOIRE
+
+Quand tu as produit au moins un fichier dans output/, tu DOIS :
+1. Appeler Write avec file_path="<outputs_json_path>" et content=JSON.stringify([...])
+2. Le JSON doit etre un tableau d'objets : {"file": "...", "label": "...", "description": "..."}
+3. Apres le Write, repondre simplement "Termine" sans appel d'outil supplementaire
+
+C'est la seule facon de signaler que le travail est complet.`;
 }
 
-// --- Build user prompt ---
+// --- User prompt builders ---
 
-function buildUserPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath) {
+function buildUserPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath, referenceFile) {
   if (params.mode === "miniature") {
-    return buildMiniaturePrompt(params, videoPaths, workDir, outputDir, outputsJsonPath);
+    return buildMiniaturePrompt(params, videoPaths, workDir, outputDir, outputsJsonPath, referenceFile);
   }
   return buildVideoPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath);
 }
 
 function buildVideoPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath) {
-  const videoList = videoPaths.map((p, i) => `- Video ${i + 1}: ${p}`).join("\n");
-  const durationInfo = params.videoType === "teaser"
-    ? `\nDuree cible: ${params.duration} secondes MAXIMUM (STRICT — ne pas depasser de plus de 3s)`
-    : "";
-  const formatInfo = params.format && params.format !== "original"
-    ? `\nFormat: ${params.format} (ajouter crop ${params.format} dans la commande ffmpeg de coupe)`
-    : "";
+  const videoList = videoPaths.map((p, i) => `  - Video ${i + 1}: ${p}`).join("\n");
+  const durationTarget = params.videoType === "teaser" ? params.duration : null;
 
-  let styleInfo = `Style sous-titres: ${params.style}`;
+  let styleConfig = {};
   try {
     const styles = JSON.parse(fs.readFileSync(path.join(PIPELINE_DIR, "styles.json"), "utf-8"));
-    const cfg = styles[params.style];
-    if (cfg) {
-      const accent = params.accentColor || cfg.accentColor;
-      styleInfo += ` (accent: ${accent}, taille: ${cfg.size}px, mots/ligne: ${cfg.wordsPerLine})`;
-    }
+    styleConfig = styles[params.style] || {};
   } catch (_) {}
+  const accent = params.accentColor || styleConfig.accentColor || "#FFD700";
+  const fontSize = styleConfig.size || 80;
+  const wpl = styleConfig.wordsPerLine || 5;
 
-  return `Mode: VIDEO
+  return `# TACHE : MONTAGE VIDEO
 
-Voici les videos uploadees :
+## Parametres
+- Mode : ${params.videoType || "teaser"}
+${durationTarget ? `- Duree cible : ${durationTarget}s MAXIMUM (strict +/- 3s)` : ""}
+- Format : ${params.format || "9:16"}${params.format === "9:16" ? " (vertical Reels — utiliser crop 9:16)" : ""}
+- Style sous-titres : ${params.style} (accent: ${accent}, taille: ${fontSize}px, mots/ligne: ${wpl})
+- Langue : ${params.language || "fr"}
+
+## Fichiers
+- Videos source :
 ${videoList}
+- Repertoire de travail : ${workDir}
+- Repertoire de sortie : ${outputDir}
+- Manifest a ecrire : ${outputsJsonPath}
 
-Repertoire de travail : ${workDir}
-Repertoire de sortie : ${outputDir}
-Fichier manifeste : ${outputsJsonPath}
+## Prompt utilisateur
+${params.prompt}
 
-Type de montage : ${params.videoType || "teaser"}${durationInfo}${formatInfo}
-${styleInfo}
-Langue : ${params.language || "fr"}${params.accentColor ? `\nCouleur accent : ${params.accentColor}` : ""}
+## CRITERES DE SUCCES
+- [ ] Au moins 1 fichier .mp4 dans ${outputDir}/
+- [ ] outputs.json existe et contient un tableau JSON non-vide
+- [ ] ${durationTarget ? `Duree du reel <= ${durationTarget + 3}s` : "Duree respecte le prompt"}
+- [ ] Sous-titres synchronises avec l'audio FINAL (re-transcription de la video coupee)
+- [ ] Description Instagram complete dans outputs.json
 
-## INSTRUCTIONS
-- Type "${params.videoType}" : ${params.videoType === "teaser" ? `Produis un teaser/reel de MAXIMUM ${params.duration} secondes. Calcule la duree totale AVANT de couper.` : params.videoType === "clean" ? "Nettoie la video complete (supprime silences, faux departs, doublons)." : "Extrais plusieurs clips courts independants avec chacun son hook et sa conclusion."}
-- SOUS-TITRES : Apres avoir coupe la video, tu DOIS re-transcrire la VIDEO COUPEE avant de bruler les sous-titres.
-- SAUVEGARDE : Copie chaque fichier final dans ${outputDir}/ et ecris le manifeste ${outputsJsonPath}
-- Utilise la langue "${params.language || "fr"}" pour la transcription.
-
-## Prompt de l'utilisateur :
-${params.prompt}`;
+## DEMARRAGE
+1. Verifier les fichiers d'input avec \`ls "${path.dirname(videoPaths[0] || "")}"\`
+2. Commencer par ffprobe puis transcribe.py sur l'original
+3. Lire la transcription JSON avec Read AVANT de decider des coupes
+4. Suivre la sequence du pipeline (voir system prompt)
+5. Terminer par Write sur outputs.json`;
 }
 
-function buildMiniaturePrompt(params, videoPaths, workDir, outputDir, outputsJsonPath) {
+function buildMiniaturePrompt(params, videoPaths, workDir, outputDir, outputsJsonPath, referenceFile) {
+  // Separate video files from reference image
   const inputDir = path.join(jobDir, "input");
-
   const videoFiles = [];
-  let referenceFile = "";
   for (const f of params.fileNames) {
-    if (params.referenceFileName && f.includes(params.referenceFileName.replace(/[^a-zA-Z0-9._-]/g, "_"))) {
-      referenceFile = path.join(inputDir, f);
-    } else if (/\.(jpg|jpeg|png|webp|gif)$/i.test(f)) {
-      if (!referenceFile) referenceFile = path.join(inputDir, f);
-    } else {
-      videoFiles.push(path.join(inputDir, f));
+    const full = path.join(inputDir, f);
+    if (!/\.(jpg|jpeg|png|webp|gif)$/i.test(f)) {
+      videoFiles.push(full);
+    } else if (full !== referenceFile) {
+      videoFiles.push(full);
     }
   }
 
-  const videoList = videoFiles.map((p, i) => `- Video ${i + 1}: ${p}`).join("\n");
+  const videoList = videoFiles.map((p, i) => `  - Video ${i + 1}: ${p}`).join("\n");
 
-  return `Mode: MINIATURE
-
-## Fichiers
-Video(s) source :
-${videoList}
-
-Image de reference : ${referenceFile}
-
-Repertoire de travail : ${workDir}
-Repertoire de sortie : ${outputDir}
-Fichier manifeste : ${outputsJsonPath}
+  return `# TACHE : GENERATION MINIATURES IA
 
 ## Parametres
-Nombre de miniatures a produire : ${params.thumbnailCount || 2}
-Format : ${params.thumbnailFormat || "16:9"} (utilise -a ${params.thumbnailFormat || "16:9"} dans nano-banana)${params.thumbnailText ? `\nTexte a ajouter : "${params.thumbnailText}"` : ""}${params.accentColor ? `\nCouleur accent : ${params.accentColor}` : ""}
+- Nombre de miniatures : ${params.thumbnailCount || 2}
+- Format : ${params.thumbnailFormat || "16:9"}
+- Texte a inclure : ${params.thumbnailText ? `"${params.thumbnailText}"` : "aucun (juste visuel)"}
+- Couleur accent : ${params.accentColor || "auto"}
 
-## INSTRUCTIONS
-1. Extrais 5-8 frames de la video a des moments expressifs/interessants (utilise ffmpeg -ss + Bash)
-2. Lis l'image de reference avec Read pour comprendre son style visuel
-3. Genere chaque miniature avec nano-banana (voir regles)
-4. SAUVEGARDE : Copie chaque miniature dans ${outputDir}/ et ecris le manifeste ${outputsJsonPath}
+## Fichiers
+- Video(s) source (pour extraire des frames) :
+${videoList}
+- Image de reference : ${referenceFile}
+  (tu la vois directement dans ce message — analyse-la visuellement)
+- Repertoire de travail (frames) : ${workDir}
+- Repertoire de sortie : ${outputDir}
+- Manifest a ecrire : ${outputsJsonPath}
 
-## Prompt de l'utilisateur :
-${params.prompt}`;
+## Prompt utilisateur
+${params.prompt}
+
+## CRITERES DE SUCCES
+- [ ] ${params.thumbnailCount || 2} fichiers .jpg/.png dans ${outputDir}/
+- [ ] Miniature 1 reproduit FIDELEMENT le style visuel de la reference (couleurs, layout, typographie)
+- [ ] Miniature 2 est une variante creative (meme palette, composition differente)
+- [ ] outputs.json valide avec tous les fichiers
+
+## DEMARRAGE (etapes obligatoires)
+1. Analyser la reference visuellement (regarde l'image ci-jointe) :
+   - Liste les 3 couleurs principales (hex si possible)
+   - Decris la typographie (police, taille, position, couleur)
+   - Decris le layout (ou est le sujet, ou est le texte, decorations)
+   - Decris le mood (bold / minimaliste / playful / corporate)
+
+2. Extraire 5-8 frames varies de la video avec ffmpeg -ss
+
+3. Selectionner les 2 meilleures frames (expressions fortes, bon cadrage)
+
+4. Generer avec nano-banana en INCLUANT l'analyse de style dans le prompt (pas juste "make a thumbnail")
+
+5. Verifier que les fichiers existent dans output/
+
+6. Ecrire outputs.json`;
 }
 
 // --- Progress detection ---
@@ -426,19 +434,19 @@ function detectProgress(text) {
   return null;
 }
 
-// --- Tool definitions for Kimi API ---
+// --- Tool schemas (explicit WHEN/HOW guidance) ---
 
 const TOOLS = [
   {
     type: "function",
     function: {
       name: "Bash",
-      description: "Execute a shell command. Returns stdout+stderr. Use for running Python scripts, ffmpeg, file operations, etc.",
+      description: "Execute a shell command. USE for: ffmpeg, ffprobe, python scripts (transcribe.py, burn_subtitles.py, generate_text_frame.py), nano-banana, ls, cp, mkdir, cat. DO NOT USE for: generating outputs.json (use Write instead). Returns stdout+stderr (truncated if > 10K chars).",
       parameters: {
         type: "object",
         properties: {
-          command: { type: "string", description: "Shell command to execute" },
-          timeout: { type: "number", description: "Timeout in seconds (default 1800 = 30min)" }
+          command: { type: "string", description: "The shell command. Can be multi-line. Use proper quoting for paths with spaces." },
+          timeout: { type: "number", description: "Timeout in seconds (default 1800 = 30min). Use 600 for quick ops, 3600 for heavy transcode." }
         },
         required: ["command"]
       }
@@ -448,11 +456,11 @@ const TOOLS = [
     type: "function",
     function: {
       name: "Read",
-      description: "Read a file. For text files returns the content. For images returns a description via the AI (since raw images are too large).",
+      description: "Read a file's content. USE for: transcription JSON (mandatory before planning cuts), styles.json, checking intermediate outputs. For images, returns an AI-generated description. Max 5MB file size. Text truncated to 18K chars if larger.",
       parameters: {
         type: "object",
         properties: {
-          file_path: { type: "string", description: "Absolute file path" }
+          file_path: { type: "string", description: "Absolute path to the file" }
         },
         required: ["file_path"]
       }
@@ -462,12 +470,12 @@ const TOOLS = [
     type: "function",
     function: {
       name: "Write",
-      description: "Write content to a file (creates or overwrites).",
+      description: "Write content to a file (creates or overwrites). USE EXCLUSIVELY for: outputs.json manifest at the END of the job (MANDATORY — without it the work is lost). DO NOT USE for: creating videos/images/audio (use Bash with ffmpeg/scripts instead).",
       parameters: {
         type: "object",
         properties: {
-          file_path: { type: "string", description: "Absolute file path" },
-          content: { type: "string", description: "File content" }
+          file_path: { type: "string", description: "Absolute path. For manifest, use the exact path given in the user prompt." },
+          content: { type: "string", description: "File content. For outputs.json, must be valid JSON array of {file, label, description} objects." }
         },
         required: ["file_path", "content"]
       }
@@ -486,12 +494,11 @@ function execBash(command, timeoutSec = 1800, env = {}) {
       env: { ...process.env, ...env },
       stdio: ["pipe", "pipe", "pipe"],
     });
-    // Truncate very long outputs (Kimi has 256K context, but let's be safe)
     const trimmed = output.trim();
     if (trimmed.length > 10000) {
-      return trimmed.slice(0, 5000) + "\n\n[...output truncated...]\n\n" + trimmed.slice(-2000);
+      return trimmed.slice(0, 5000) + "\n\n[...output truncated...]\n\n" + trimmed.slice(-3000);
     }
-    return trimmed || "(no output)";
+    return trimmed || "(no output — command succeeded with empty stdout)";
   } catch (err) {
     const stderr = (err.stderr || "").toString().trim();
     const stdout = (err.stdout || "").toString().trim();
@@ -503,20 +510,16 @@ function execBash(command, timeoutSec = 1800, env = {}) {
   }
 }
 
-function execRead(filePath) {
+async function execRead(filePath) {
   if (!fs.existsSync(filePath)) return `ERROR: File not found: ${filePath}`;
   const stats = fs.statSync(filePath);
-  if (stats.size > 5 * 1024 * 1024) return `ERROR: File too large (${(stats.size / 1024 / 1024).toFixed(1)}MB)`;
+  if (stats.size > 5 * 1024 * 1024) return `ERROR: File too large (${(stats.size / 1024 / 1024).toFixed(1)}MB). Use Bash with head/tail to sample.`;
 
-  // Check if image — describe it using Kimi vision
   const isImage = /\.(jpg|jpeg|png|webp|gif)$/i.test(filePath);
   if (isImage) {
-    // Return a note — in the main loop we'll handle images separately by sending them as content blocks
-    // For simplicity, we describe the image via a Kimi vision call inline
-    return describeImage(filePath);
+    return await describeImage(filePath);
   }
 
-  // Text file
   try {
     const content = fs.readFileSync(filePath, "utf-8");
     if (content.length > 20000) {
@@ -538,7 +541,7 @@ function execWrite(filePath, content) {
   }
 }
 
-// --- Image description via Kimi vision ---
+// --- Image description via Kimi vision (detailed) ---
 
 async function describeImage(filePath) {
   try {
@@ -555,33 +558,55 @@ async function describeImage(filePath) {
         "Authorization": `Bearer ${process.env.KIMI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "moonshot-v1-128k-vision-preview",
+        model: VISION_MODEL,
         messages: [
           {
             role: "user",
             content: [
               { type: "image_url", image_url: { url: dataUrl } },
-              { type: "text", text: "Decris cette image en detail : composition, couleurs, fond, elements decoratifs, typographie si texte visible, style visuel global. Sois precis pour permettre la reproduction du style. Reponds en francais." }
+              { type: "text", text: "Decris cette image avec un MAXIMUM de details, en francais :\n\n1. COULEURS : liste les 3-5 couleurs dominantes avec codes hex approximatifs (background, texte, accents).\n2. TYPOGRAPHIE : police (sans-serif / serif / display), taille relative, couleur, position, outline/shadow/glow.\n3. COMPOSITION : ou est le sujet principal ? ou est le texte ? left/right/center/top/bottom.\n4. ELEMENTS DECORATIFS : bordures, flecheurs, emojis, badges, formes geometriques, cadres incline.\n5. MOOD : bold / minimaliste / playful / corporate / gaming / food.\n6. SUJET : quelle personne/objet est mis en avant.\n\nSois TRES precis pour que quelqu'un puisse reproduire le style." }
             ]
           }
         ],
-        max_tokens: 800,
+        max_tokens: 1200,
       }),
     });
 
     if (!res.ok) {
       const errText = await res.text();
-      return `[Image ${filePath} — vision API error ${res.status}: ${errText.slice(0, 200)}]`;
+      return `[Image ${path.basename(filePath)} — vision error ${res.status}: ${errText.slice(0, 200)}]`;
     }
     const data = await res.json();
     const description = data.choices?.[0]?.message?.content || "(no description)";
-    return `[Description de l'image ${path.basename(filePath)}]\n${description}`;
+    return `[Analyse detaillee de ${path.basename(filePath)}]\n${description}`;
   } catch (err) {
-    return `[Image ${filePath} — could not describe: ${err.message}]`;
+    return `[Image ${path.basename(filePath)} — ${err.message}]`;
   }
 }
 
-// --- Kimi API call ---
+// --- Coaching on tool errors ---
+
+function coachOnError(toolName, result) {
+  if (!String(result).startsWith("ERROR")) return result;
+  let hint = "";
+  const r = String(result);
+  if (r.includes("not found") || r.includes("No such file")) {
+    hint = "\n\n[ASTUCE] Utilise Bash avec `ls \"<chemin_parent>\"` pour verifier les fichiers presents, puis corrige le chemin.";
+  } else if (r.includes("timed out") || r.includes("ETIMEDOUT")) {
+    hint = "\n\n[ASTUCE] Commande trop longue. Augmente le timeout ou decompose en sous-etapes.";
+  } else if (toolName === "Bash" && (r.includes("Invalid argument") || r.includes("Unable to parse"))) {
+    hint = "\n\n[ASTUCE] Verifie la syntaxe de la commande, notamment les guillemets autour des chemins.";
+  } else if (toolName === "Bash" && r.includes("ffmpeg")) {
+    hint = "\n\n[ASTUCE] Pour un ffmpeg error, verifie : (1) l'input existe avec ls, (2) le filter_complex est bien forme, (3) les labels de stream ([v0], [a0]) correspondent.";
+  } else if (r.includes("concat")) {
+    hint = "\n\n[ASTUCE] Utilise le concat FILTER (-filter_complex \"...concat=n=...\"), JAMAIS le concat demuxer (-f concat).";
+  } else if (toolName === "Write" && r.includes("ENOENT")) {
+    hint = "\n\n[ASTUCE] Le repertoire parent n'existe pas. Cree-le d'abord avec Bash: `mkdir -p <dir>`.";
+  }
+  return r + hint;
+}
+
+// --- Kimi API call with retry ---
 
 async function callKimi(messages) {
   const res = await fetch(KIMI_API_URL, {
@@ -595,21 +620,88 @@ async function callKimi(messages) {
       messages,
       tools: TOOLS,
       temperature: 1,
-      max_tokens: 4000,
+      max_tokens: MAX_TOKENS,
     }),
   });
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Kimi API error ${res.status}: ${errText.slice(0, 500)}`);
+    const err = new Error(`Kimi API error ${res.status}: ${errText.slice(0, 500)}`);
+    err.status = res.status;
+    throw err;
   }
   return res.json();
+}
+
+async function callKimiWithRetry(messages) {
+  let lastErr;
+  for (let attempt = 0; attempt < API_RETRIES; attempt++) {
+    try {
+      return await callKimi(messages);
+    } catch (err) {
+      lastErr = err;
+      const isTransient = [429, 500, 502, 503, 504].includes(err.status);
+      if (isTransient && attempt < API_RETRIES - 1) {
+        const backoff = Math.pow(2, attempt + 1) * 1000;
+        addLog(`API ${err.status} — retry ${attempt + 1}/${API_RETRIES} dans ${backoff / 1000}s`);
+        await new Promise(r => setTimeout(r, backoff));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
+// --- Identify reference file for miniature mode ---
+
+function findReferenceFile(params) {
+  const inputDir = path.join(jobDir, "input");
+  if (params.mode !== "miniature") return null;
+
+  if (params.referenceFileName) {
+    const sanitized = params.referenceFileName.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const candidate = path.join(inputDir, sanitized);
+    if (fs.existsSync(candidate)) return candidate;
+    // Also try matching any file that contains the sanitized name
+    for (const f of params.fileNames) {
+      if (f.includes(sanitized)) return path.join(inputDir, f);
+    }
+  }
+  // Fallback: first image file
+  for (const f of params.fileNames) {
+    if (/\.(jpg|jpeg|png|webp|gif)$/i.test(f)) return path.join(inputDir, f);
+  }
+  return null;
+}
+
+// --- Build first user message (may include inline reference image for miniature) ---
+
+function buildUserMessage(params, userPromptText, referenceFile) {
+  if (params.mode === "miniature" && referenceFile && fs.existsSync(referenceFile)) {
+    try {
+      const imgBuffer = fs.readFileSync(referenceFile);
+      const ext = path.extname(referenceFile).slice(1).toLowerCase();
+      const mime = ext === "jpg" ? "jpeg" : ext;
+      const base64 = imgBuffer.toString("base64");
+      return {
+        role: "user",
+        content: [
+          { type: "text", text: userPromptText },
+          { type: "image_url", image_url: { url: `data:image/${mime};base64,${base64}` } },
+        ],
+      };
+    } catch (err) {
+      addLog(`Avertissement: impossible d'inclure l'image reference inline — ${err.message}`);
+    }
+  }
+  return { role: "user", content: userPromptText };
 }
 
 // --- Main ---
 
 async function main() {
-  console.log(`[WORKER ${jobId}] Starting...`);
+  console.log(`[WORKER ${jobId}] Starting (model=${KIMI_MODEL})...`);
 
   if (!process.env.KIMI_API_KEY) {
     writeError("KIMI_API_KEY not set. Ajoute-la dans le fichier .env");
@@ -624,7 +716,6 @@ async function main() {
 
   const params = JSON.parse(fs.readFileSync(paramsPath, "utf-8"));
   console.log(`[WORKER ${jobId}] Params: mode=${params.mode || "video"}, prompt="${params.prompt.slice(0, 50)}..."`);
-  console.log(`[WORKER ${jobId}] Kimi model: ${KIMI_MODEL}`);
 
   const inputDir = path.join(jobDir, "input");
   const workDir = path.join(jobDir, "work");
@@ -634,12 +725,18 @@ async function main() {
   fs.mkdirSync(outputDir, { recursive: true });
 
   const videoPaths = params.fileNames.map(f => path.join(inputDir, f));
-
   const ffmpegPath = findFfmpegFull();
   console.log(`[WORKER ${jobId}] FFmpeg: ${ffmpegPath}`);
 
+  const referenceFile = findReferenceFile(params);
+
   const systemPrompt = buildSystemPrompt(ffmpegPath);
-  const userPrompt = buildUserPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath);
+  const userPromptText = buildUserPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath, referenceFile);
+
+  // Task summary for context re-injection
+  const taskSummary = params.mode === "miniature"
+    ? `mode=miniature, ${params.thumbnailCount || 2} miniatures, format=${params.thumbnailFormat || "16:9"}, reference=${referenceFile ? path.basename(referenceFile) : "none"}`
+    : `mode=video, type=${params.videoType || "teaser"}, duree max=${params.duration || 30}s, format=${params.format || "9:16"}, style=${params.style}, langue=${params.language || "fr"}`;
 
   updateStatus({ status: "processing", step: "Initialisation", progress: 5, message: `Demarrage (${KIMI_MODEL})...` });
   if (params.mode === "miniature") {
@@ -647,16 +744,14 @@ async function main() {
     const imageCount = params.fileNames.filter(f => /\.(jpg|jpeg|png|webp|gif)$/i.test(f)).length;
     addLog(`Mode miniature — ${videoCount} video(s), ${imageCount} image(s) reference`);
   } else {
-    addLog(`Demarrage avec ${params.fileNames.length} video(s)`);
+    addLog(`Demarrage avec ${params.fileNames.length} video(s) — modele ${KIMI_MODEL}`);
   }
 
-  // Build messages array (OpenAI-compatible format)
   const messages = [
     { role: "system", content: systemPrompt },
-    { role: "user", content: userPrompt },
+    buildUserMessage(params, userPromptText, referenceFile),
   ];
 
-  // Environment for tool execution
   const toolEnv = {
     PATH: `${path.join(process.env.HOME || "", ".local", "bin")}:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}`,
     FFMPEG_PATH: ffmpegPath,
@@ -665,23 +760,31 @@ async function main() {
 
   let lastProgress = 5;
   let iteration = 0;
+  let outputsJsonReminderCount = 0;
   const usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
 
-  // Agentic loop
   while (iteration < MAX_ITERATIONS) {
     iteration++;
     console.log(`[WORKER ${jobId}] Iteration ${iteration}/${MAX_ITERATIONS}`);
 
+    // Context re-injection every N iterations
+    if (iteration > 1 && iteration % CONTEXT_REMINDER_EVERY === 0) {
+      messages.push({
+        role: "user",
+        content: `[RAPPEL — iteration ${iteration}/${MAX_ITERATIONS}] Verifie que tu respectes toujours : ${taskSummary}. N'oublie pas d'ecrire outputs.json a la fin.`,
+      });
+    }
+
     let response;
     try {
-      response = await callKimi(messages);
+      response = await callKimiWithRetry(messages);
     } catch (err) {
-      addLog(`Erreur Kimi API: ${err.message}`);
+      addLog(`Erreur Kimi API (apres retries): ${err.message}`);
       writeError(`Kimi API: ${err.message}`);
       process.exit(1);
     }
 
-    // Track token usage
+    // Track tokens
     if (response.usage) {
       usage.input_tokens += response.usage.prompt_tokens || 0;
       usage.output_tokens += response.usage.completion_tokens || 0;
@@ -695,9 +798,8 @@ async function main() {
     }
 
     const message = choice.message;
-    messages.push(message);
+    messages.push(message); // preserves reasoning_content + tool_calls + content
 
-    // Log assistant text
     if (message.content) {
       const text = message.content.trim();
       if (text) addLog(`Kimi: ${text.slice(0, 300)}`);
@@ -705,13 +807,45 @@ async function main() {
 
     const toolCalls = message.tool_calls || [];
 
-    // No more tool calls → Kimi is done
+    // Done path: no tool calls
     if (toolCalls.length === 0) {
+      // Verify outputs.json before declaring done
+      let valid = false;
+      if (fs.existsSync(outputsJsonPath)) {
+        try {
+          const content = JSON.parse(fs.readFileSync(outputsJsonPath, "utf-8"));
+          if (Array.isArray(content) && content.length > 0) valid = true;
+        } catch (_) {}
+      }
+
+      if (!valid && outputsJsonReminderCount < OUTPUTS_JSON_RETRIES) {
+        outputsJsonReminderCount++;
+        addLog(`outputs.json manquant ou invalide — rappel ${outputsJsonReminderCount}/${OUTPUTS_JSON_RETRIES}`);
+        // Scan output dir to suggest files
+        let existingFiles = [];
+        if (fs.existsSync(outputDir)) {
+          existingFiles = fs.readdirSync(outputDir).filter(f => /\.(mp4|mov|jpg|jpeg|png|webm)$/i.test(f));
+        }
+        messages.push({
+          role: "user",
+          content: `[VERIFICATION MANQUANTE] Tu n'as pas ecrit outputs.json (ou il est vide). C'est OBLIGATOIRE pour terminer.
+
+${existingFiles.length > 0 ? `Fichiers deja presents dans ${outputDir}/ :\n${existingFiles.map(f => `  - ${f}`).join("\n")}\n` : `Aucun fichier dans ${outputDir}/ pour l'instant — tu dois d'abord copier tes livrables la-bas avec Bash 'cp'.\n`}
+
+Utilise l'outil Write MAINTENANT :
+- file_path : "${outputsJsonPath}"
+- content : un JSON array comme : [{"file":"nom.mp4","label":"Titre court","description":"Description Instagram longue avec emojis et hashtags"}]
+
+Apres le Write, reponds juste "Termine" sans autre appel d'outil.`,
+        });
+        continue;
+      }
+
       addLog(`Pipeline termine (${iteration} tours)`);
       break;
     }
 
-    // Execute each tool call
+    // Execute tool calls
     for (const tc of toolCalls) {
       const fnName = tc.function?.name;
       let args = {};
@@ -724,13 +858,11 @@ async function main() {
         const cmd = args.command || "";
         const shortCmd = cmd.length > 150 ? cmd.slice(0, 150) + "..." : cmd;
         addLog(`Bash: ${shortCmd}`);
-
         const progress = detectProgress(cmd);
         if (progress && progress.progress > lastProgress) {
           lastProgress = progress.progress;
           updateStatus(progress);
         }
-
         result = execBash(cmd, args.timeout || 1800, toolEnv);
       } else if (fnName === "Read") {
         const fp = args.file_path || "";
@@ -738,16 +870,24 @@ async function main() {
         result = await execRead(fp);
       } else if (fnName === "Write") {
         const fp = args.file_path || "";
-        addLog(`Write: ${fp} (${(args.content || "").length} chars)`);
+        const contentLen = (args.content || "").length;
+        addLog(`Write: ${fp} (${contentLen} chars)`);
         result = execWrite(fp, args.content || "");
+        // Detect outputs.json write for progress
+        if (fp === outputsJsonPath) {
+          updateStatus({ step: "Sauvegarde", progress: 95, message: "outputs.json ecrit..." });
+        }
       } else {
         result = `ERROR: Unknown tool: ${fnName}`;
       }
 
+      // Coach on errors
+      const finalResult = coachOnError(fnName, result);
+
       messages.push({
         role: "tool",
         tool_call_id: tc.id,
-        content: String(result),
+        content: String(finalResult),
       });
     }
   }
@@ -784,7 +924,7 @@ async function main() {
     }
   }
 
-  // Compute estimated cost (Kimi K2.5 pricing — miss rate approx)
+  // Cost estimation
   const PRICING = {
     "kimi-k2.5": { input: 0.60, output: 2.50 },
     "kimi-k2.6": { input: 0.95, output: 4.00 },
@@ -792,7 +932,7 @@ async function main() {
     "kimi-k2-turbo-preview": { input: 1.15, output: 8.00 },
     "kimi-k2-thinking-turbo": { input: 1.15, output: 8.00 },
   };
-  const rate = PRICING[KIMI_MODEL] || PRICING["kimi-k2.5"];
+  const rate = PRICING[KIMI_MODEL] || PRICING["kimi-k2.6"];
   const estCost = (usage.input_tokens / 1_000_000) * rate.input + (usage.output_tokens / 1_000_000) * rate.output;
 
   const tokenSummary = {
@@ -805,7 +945,6 @@ async function main() {
 
   addLog(`Tokens — in: ${usage.input_tokens}, out: ${usage.output_tokens}, total: ${usage.total_tokens} (~$${tokenSummary.estimated_cost_usd})`);
 
-  // Final status
   if (outputs.length > 0) {
     updateStatus({
       status: "done",
