@@ -91,7 +91,12 @@ function findFfmpegFull() {
 // --- System prompt (robust, examples-driven) ---
 
 function buildSystemPrompt(ffmpegPath) {
-  const stylesJson = fs.readFileSync(path.join(PIPELINE_DIR, "styles.json"), "utf-8");
+  let stylesJson = "{}";
+  try {
+    stylesJson = fs.readFileSync(path.join(PIPELINE_DIR, "styles.json"), "utf-8");
+  } catch (e) {
+    console.error(`[WORKER ${jobId}] Warning: styles.json not readable (${e.message})`);
+  }
 
   return `# IDENTITE
 Tu es un agent AUTONOME de montage video professionnel. Tu executes les commandes, tu ne poses JAMAIS de questions. Si quelque chose manque, tu fais un choix raisonnable et tu continues.
@@ -547,6 +552,7 @@ function execWrite(filePath, content) {
 // --- Image description via Kimi vision (detailed) ---
 
 const imageDescriptionCache = new Map();
+const visionUsage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
 
 async function describeImage(filePath) {
   // Cache by absolute path + mtime (so edits invalidate)
@@ -592,6 +598,14 @@ async function describeImage(filePath) {
       return `[Image ${path.basename(filePath)} — vision error ${res.status}: ${errText.slice(0, 200)}]`;
     }
     const data = await res.json();
+
+    // Track vision API usage (separate model, cheaper but still counts)
+    if (data.usage) {
+      visionUsage.input_tokens += data.usage.prompt_tokens || 0;
+      visionUsage.output_tokens += data.usage.completion_tokens || 0;
+      visionUsage.total_tokens += data.usage.total_tokens || 0;
+    }
+
     const description = data.choices?.[0]?.message?.content || "(no description)";
     const result = `[Analyse detaillee de ${path.basename(filePath)}]\n${description}`;
 
@@ -714,8 +728,13 @@ function buildUserMessage(params, userPromptText, referenceFile) {
     try {
       const imgBuffer = fs.readFileSync(referenceFile);
       if (imgBuffer.length > MAX_IMAGE_BYTES) {
-        addLog(`Image reference trop grande (${(imgBuffer.length / 1024 / 1024).toFixed(1)}MB) — fallback texte.`);
-        return { role: "user", content: userPromptText };
+        addLog(`Image reference trop grande (${(imgBuffer.length / 1024 / 1024).toFixed(1)}MB) — fallback Read.`);
+        // Fallback prompt doesn't promise inline image
+        const fallbackPrompt = userPromptText.replace(
+          /\(tu la vois directement dans ce message — analyse-la visuellement\)/g,
+          "(utilise Read sur ce chemin pour obtenir une description detaillee du style)"
+        );
+        return { role: "user", content: fallbackPrompt };
       }
       const ext = path.extname(referenceFile).slice(1).toLowerCase();
       const mime = ext === "jpg" ? "jpeg" : ext;
@@ -729,6 +748,12 @@ function buildUserMessage(params, userPromptText, referenceFile) {
       };
     } catch (err) {
       addLog(`Avertissement: impossible d'inclure l'image reference inline — ${err.message}`);
+      // Fallback: adjust prompt
+      const fallbackPrompt = userPromptText.replace(
+        /\(tu la vois directement dans ce message — analyse-la visuellement\)/g,
+        "(utilise Read sur ce chemin pour obtenir une description detaillee du style)"
+      );
+      return { role: "user", content: fallbackPrompt };
     }
   }
   return { role: "user", content: userPromptText };
@@ -859,8 +884,8 @@ async function main() {
     }
 
     const choice = response.choices?.[0];
-    if (!choice) {
-      addLog("Pas de reponse de Kimi");
+    if (!choice || !choice.message) {
+      addLog(`Reponse Kimi invalide (pas de choices/message): ${JSON.stringify(response).slice(0, 200)}`);
       break;
     }
 
@@ -1006,17 +1031,23 @@ Apres le Write, reponds juste "Termine" sans autre appel d'outil.`,
     "kimi-k2-thinking-turbo": { input: 1.15, output: 8.00 },
   };
   const rate = PRICING[KIMI_MODEL] || PRICING["kimi-k2.6"];
-  const estCost = (usage.input_tokens / 1_000_000) * rate.input + (usage.output_tokens / 1_000_000) * rate.output;
+  const VISION_RATE = { input: 0.60, output: 2.50 }; // moonshot-v1 pricing approx
+  const mainCost = (usage.input_tokens / 1_000_000) * rate.input + (usage.output_tokens / 1_000_000) * rate.output;
+  const visionCost = (visionUsage.input_tokens / 1_000_000) * VISION_RATE.input + (visionUsage.output_tokens / 1_000_000) * VISION_RATE.output;
+  const totalCost = mainCost + visionCost;
 
   const tokenSummary = {
     model: KIMI_MODEL,
-    input: usage.input_tokens,
-    output: usage.output_tokens,
-    total: usage.total_tokens,
-    estimated_cost_usd: Math.round(estCost * 10000) / 10000,
+    input: usage.input_tokens + visionUsage.input_tokens,
+    output: usage.output_tokens + visionUsage.output_tokens,
+    total: usage.total_tokens + visionUsage.total_tokens,
+    estimated_cost_usd: Math.round(totalCost * 10000) / 10000,
   };
 
-  addLog(`Tokens — in: ${usage.input_tokens}, out: ${usage.output_tokens}, total: ${usage.total_tokens} (~$${tokenSummary.estimated_cost_usd})`);
+  const visionNote = visionUsage.total_tokens > 0
+    ? ` (+vision: ${visionUsage.total_tokens} tokens)`
+    : "";
+  addLog(`Tokens — in: ${tokenSummary.input}, out: ${tokenSummary.output}, total: ${tokenSummary.total}${visionNote} (~$${tokenSummary.estimated_cost_usd})`);
 
   if (outputs.length > 0) {
     updateStatus({
