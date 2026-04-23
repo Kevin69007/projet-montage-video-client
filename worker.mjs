@@ -36,6 +36,8 @@ const MAX_TOKENS = 8000;
 const API_RETRIES = 3;
 const CONTEXT_REMINDER_EVERY = 7;
 const OUTPUTS_JSON_RETRIES = 2;
+const JOB_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour overall timeout
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4MB max for vision API
 
 // --- Status helpers ---
 
@@ -313,11 +315,12 @@ function buildUserPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath
 function buildVideoPrompt(params, videoPaths, workDir, outputDir, outputsJsonPath) {
   const videoList = videoPaths.map((p, i) => `  - Video ${i + 1}: ${p}`).join("\n");
   const durationTarget = params.videoType === "teaser" ? params.duration : null;
+  const styleName = params.style || "hormozi";
 
   let styleConfig = {};
   try {
     const styles = JSON.parse(fs.readFileSync(path.join(PIPELINE_DIR, "styles.json"), "utf-8"));
-    styleConfig = styles[params.style] || {};
+    styleConfig = styles[styleName] || {};
   } catch (_) {}
   const accent = params.accentColor || styleConfig.accentColor || "#FFD700";
   const fontSize = styleConfig.size || 80;
@@ -329,7 +332,7 @@ function buildVideoPrompt(params, videoPaths, workDir, outputDir, outputsJsonPat
 - Mode : ${params.videoType || "teaser"}
 ${durationTarget ? `- Duree cible : ${durationTarget}s MAXIMUM (strict +/- 3s)` : ""}
 - Format : ${params.format || "9:16"}${params.format === "9:16" ? " (vertical Reels — utiliser crop 9:16)" : ""}
-- Style sous-titres : ${params.style} (accent: ${accent}, taille: ${fontSize}px, mots/ligne: ${wpl})
+- Style sous-titres : ${styleName} (accent: ${accent}, taille: ${fontSize}px, mots/ligne: ${wpl})
 - Langue : ${params.language || "fr"}
 
 ## Fichiers
@@ -543,9 +546,21 @@ function execWrite(filePath, content) {
 
 // --- Image description via Kimi vision (detailed) ---
 
+const imageDescriptionCache = new Map();
+
 async function describeImage(filePath) {
+  // Cache by absolute path + mtime (so edits invalidate)
   try {
+    const stats = fs.statSync(filePath);
+    const cacheKey = `${filePath}:${stats.mtimeMs}:${stats.size}`;
+    if (imageDescriptionCache.has(cacheKey)) {
+      return imageDescriptionCache.get(cacheKey);
+    }
+
     const imgBuffer = fs.readFileSync(filePath);
+    if (imgBuffer.length > MAX_IMAGE_BYTES) {
+      return `[Image ${path.basename(filePath)} trop grande (${(imgBuffer.length / 1024 / 1024).toFixed(1)}MB). Utilise Bash + ImageMagick pour la redimensionner: \`magick "${filePath}" -resize 1024x1024 "${filePath}.small.jpg"\` puis Read sur le fichier redimensionne.]`;
+    }
     const ext = path.extname(filePath).slice(1).toLowerCase();
     const mime = ext === "jpg" ? "jpeg" : ext;
     const base64 = imgBuffer.toString("base64");
@@ -578,7 +593,11 @@ async function describeImage(filePath) {
     }
     const data = await res.json();
     const description = data.choices?.[0]?.message?.content || "(no description)";
-    return `[Analyse detaillee de ${path.basename(filePath)}]\n${description}`;
+    const result = `[Analyse detaillee de ${path.basename(filePath)}]\n${description}`;
+
+    // Cache
+    imageDescriptionCache.set(cacheKey, result);
+    return result;
   } catch (err) {
     return `[Image ${path.basename(filePath)} — ${err.message}]`;
   }
@@ -598,8 +617,9 @@ function coachOnError(toolName, result) {
     hint = "\n\n[ASTUCE] Verifie la syntaxe de la commande, notamment les guillemets autour des chemins.";
   } else if (toolName === "Bash" && r.includes("ffmpeg")) {
     hint = "\n\n[ASTUCE] Pour un ffmpeg error, verifie : (1) l'input existe avec ls, (2) le filter_complex est bien forme, (3) les labels de stream ([v0], [a0]) correspondent.";
-  } else if (r.includes("concat")) {
-    hint = "\n\n[ASTUCE] Utilise le concat FILTER (-filter_complex \"...concat=n=...\"), JAMAIS le concat demuxer (-f concat).";
+    if (r.includes("concat")) {
+      hint += "\n[ASTUCE] Utilise le concat FILTER (-filter_complex \"...concat=n=...\"), JAMAIS le concat demuxer (-f concat).";
+    }
   } else if (toolName === "Write" && r.includes("ENOENT")) {
     hint = "\n\n[ASTUCE] Le repertoire parent n'existe pas. Cree-le d'abord avec Bash: `mkdir -p <dir>`.";
   }
@@ -640,10 +660,22 @@ async function callKimiWithRetry(messages) {
       return await callKimi(messages);
     } catch (err) {
       lastErr = err;
-      const isTransient = [429, 500, 502, 503, 504].includes(err.status);
+      const isHttpTransient = [429, 500, 502, 503, 504].includes(err.status);
+      // Network errors (no .status): ECONNRESET, ETIMEDOUT, ENOTFOUND, etc.
+      const isNetworkError = !err.status && (
+        err.code === "ECONNRESET" ||
+        err.code === "ETIMEDOUT" ||
+        err.code === "ENOTFOUND" ||
+        err.code === "ECONNREFUSED" ||
+        err.message?.includes("fetch failed") ||
+        err.message?.includes("network")
+      );
+      const isTransient = isHttpTransient || isNetworkError;
+
       if (isTransient && attempt < API_RETRIES - 1) {
         const backoff = Math.pow(2, attempt + 1) * 1000;
-        addLog(`API ${err.status} — retry ${attempt + 1}/${API_RETRIES} dans ${backoff / 1000}s`);
+        const label = err.status ? `HTTP ${err.status}` : (err.code || "network error");
+        addLog(`API ${label} — retry ${attempt + 1}/${API_RETRIES} dans ${backoff / 1000}s`);
         await new Promise(r => setTimeout(r, backoff));
         continue;
       }
@@ -681,6 +713,10 @@ function buildUserMessage(params, userPromptText, referenceFile) {
   if (params.mode === "miniature" && referenceFile && fs.existsSync(referenceFile)) {
     try {
       const imgBuffer = fs.readFileSync(referenceFile);
+      if (imgBuffer.length > MAX_IMAGE_BYTES) {
+        addLog(`Image reference trop grande (${(imgBuffer.length / 1024 / 1024).toFixed(1)}MB) — fallback texte.`);
+        return { role: "user", content: userPromptText };
+      }
       const ext = path.extname(referenceFile).slice(1).toLowerCase();
       const mime = ext === "jpg" ? "jpeg" : ext;
       const base64 = imgBuffer.toString("base64");
@@ -714,7 +750,22 @@ async function main() {
     process.exit(1);
   }
 
-  const params = JSON.parse(fs.readFileSync(paramsPath, "utf-8"));
+  let params;
+  try {
+    params = JSON.parse(fs.readFileSync(paramsPath, "utf-8"));
+  } catch (e) {
+    writeError(`params.json invalide: ${e.message}`);
+    process.exit(1);
+  }
+
+  // Defensive defaults
+  params.fileNames = Array.isArray(params.fileNames) ? params.fileNames : [];
+  params.prompt = params.prompt || "(no prompt)";
+  if (params.fileNames.length === 0) {
+    writeError("Aucun fichier dans params.fileNames");
+    process.exit(1);
+  }
+
   console.log(`[WORKER ${jobId}] Params: mode=${params.mode || "video"}, prompt="${params.prompt.slice(0, 50)}..."`);
 
   const inputDir = path.join(jobDir, "input");
@@ -736,7 +787,7 @@ async function main() {
   // Task summary for context re-injection
   const taskSummary = params.mode === "miniature"
     ? `mode=miniature, ${params.thumbnailCount || 2} miniatures, format=${params.thumbnailFormat || "16:9"}, reference=${referenceFile ? path.basename(referenceFile) : "none"}`
-    : `mode=video, type=${params.videoType || "teaser"}, duree max=${params.duration || 30}s, format=${params.format || "9:16"}, style=${params.style}, langue=${params.language || "fr"}`;
+    : `mode=video, type=${params.videoType || "teaser"}, duree max=${params.duration || 30}s, format=${params.format || "9:16"}, style=${params.style || "hormozi"}, langue=${params.language || "fr"}`;
 
   updateStatus({ status: "processing", step: "Initialisation", progress: 5, message: `Demarrage (${KIMI_MODEL})...` });
   if (params.mode === "miniature") {
@@ -752,8 +803,16 @@ async function main() {
     buildUserMessage(params, userPromptText, referenceFile),
   ];
 
+  // Build PATH: add common bin dirs (Docker = /usr/local/bin, Mac = /opt/homebrew/bin)
+  const extraPaths = [
+    "/root/.bun/bin",                             // Docker root bun
+    path.join(process.env.HOME || "", ".bun", "bin"), // User bun
+    path.join(process.env.HOME || "", ".local", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+  ].filter(p => p && fs.existsSync(p));
   const toolEnv = {
-    PATH: `${path.join(process.env.HOME || "", ".local", "bin")}:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}`,
+    PATH: `${extraPaths.join(":")}:${process.env.PATH || ""}`,
     FFMPEG_PATH: ffmpegPath,
     FONTS_DIR: FONTS_DIR,
   };
@@ -762,9 +821,17 @@ async function main() {
   let iteration = 0;
   let outputsJsonReminderCount = 0;
   const usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+  const jobStartTime = Date.now();
 
   while (iteration < MAX_ITERATIONS) {
     iteration++;
+
+    // Overall job timeout
+    if (Date.now() - jobStartTime > JOB_TIMEOUT_MS) {
+      addLog(`Timeout global atteint (${JOB_TIMEOUT_MS / 60000} min)`);
+      break;
+    }
+
     console.log(`[WORKER ${jobId}] Iteration ${iteration}/${MAX_ITERATIONS}`);
 
     // Context re-injection every N iterations
@@ -814,7 +881,13 @@ async function main() {
       if (fs.existsSync(outputsJsonPath)) {
         try {
           const content = JSON.parse(fs.readFileSync(outputsJsonPath, "utf-8"));
-          if (Array.isArray(content) && content.length > 0) valid = true;
+          // Must be non-empty array where each entry has at least {file, label}
+          if (Array.isArray(content) && content.length > 0 && content.every(e => e && typeof e.file === "string" && e.file.length > 0)) {
+            // Verify files actually exist on disk
+            const missing = content.filter(e => !fs.existsSync(path.join(outputDir, e.file)));
+            if (missing.length === 0) valid = true;
+            else addLog(`outputs.json liste des fichiers manquants: ${missing.map(m => m.file).join(", ")}`);
+          }
         } catch (_) {}
       }
 
