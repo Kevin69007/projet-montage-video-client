@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { getEditorData, saveEditorState } from "@/lib/api";
+import { getEditorData, renderEditor, saveEditorState } from "@/lib/api";
 import type { AppliedSubtitleStyle, EditorData, EditorState } from "@/lib/editor/types";
 import {
   buildInitialState,
@@ -62,6 +62,8 @@ export default function EditorPage() {
   const [showSubtitles, setShowSubtitles] = useState(true);
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isRendering, setIsRendering] = useState(false);
+  const [renderError, setRenderError] = useState("");
 
   const videoElRef = useRef<HTMLVideoElement | null>(null);
 
@@ -150,6 +152,31 @@ export default function EditorPage() {
     };
   }, [state, jobId, file, data]);
 
+  // Render action — applies edits, produces new video version, returns to results page
+  const handleRender = useCallback(
+    async (burnSubtitles: boolean) => {
+      setRenderError("");
+      setIsRendering(true);
+      try {
+        // Make sure latest state is saved first
+        await saveEditorState(jobId, file, state);
+        const result = await renderEditor(jobId, file, state, burnSubtitles);
+        // Go to the new version's editor (subtitlesBurned=false → editable;
+        // if burned, go back to results page)
+        if (result.subtitlesBurned) {
+          router.push(`/job/${jobId}`);
+        } else {
+          router.push(`/job/${jobId}/editor/${encodeURIComponent(result.videoFile)}`);
+        }
+      } catch (e) {
+        const err = e as Error;
+        setRenderError(err.message || "Erreur de rendu");
+        setIsRendering(false);
+      }
+    },
+    [jobId, file, state, router]
+  );
+
   // Compute segments from cuts
   const segments = useMemo(
     () => computeSegments(state.cuts, state.deletedSegments, duration),
@@ -234,9 +261,25 @@ export default function EditorPage() {
             )}
             {!isSaving && savedAt && (
               <span className="text-xs text-purple-light font-mono">
-                ✓ Sauvegarde {new Date(savedAt).toLocaleTimeString("fr-FR")}
+                ✓ {new Date(savedAt).toLocaleTimeString("fr-FR")}
               </span>
             )}
+            <button
+              onClick={() => handleRender(false)}
+              disabled={isRendering || state.cuts.length === 0 && state.transcription.every((e) => !e.deleted)}
+              className="btn-ghost text-sm disabled:opacity-40"
+              title="Applique les coupes uniquement, sans sous-titres"
+            >
+              {isRendering ? "Rendu..." : "Appliquer coupes"}
+            </button>
+            <button
+              onClick={() => handleRender(true)}
+              disabled={isRendering || !state.style.config}
+              className="btn-primary text-sm disabled:opacity-40"
+              title="Applique les coupes + bruler les sous-titres avec le style actuel"
+            >
+              {isRendering ? "Rendu..." : "Appliquer + sous-titres"}
+            </button>
             <button
               onClick={() => router.push(`/job/${jobId}`)}
               className="btn-ghost text-sm"
@@ -332,9 +375,15 @@ export default function EditorPage() {
                 <li><span className="font-mono">Z</span> — annuler dernier cut</li>
               </ul>
               <p className="mt-3 italic opacity-70">
-                Phase 4 ajoutera le bouton &ldquo;Appliquer &amp; Re-render&rdquo;.
+                Les modifications se sauvegardent automatiquement. Clique sur &laquo;Appliquer&raquo; en haut pour produire une nouvelle version.
               </p>
             </div>
+
+            {renderError && (
+              <div className="border border-red-500/30 bg-red-500/5 p-3">
+                <p className="text-xs text-red-400">{renderError}</p>
+              </div>
+            )}
           </div>
         </div>
       </div>

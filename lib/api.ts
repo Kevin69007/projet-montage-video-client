@@ -144,3 +144,33 @@ export async function saveEditorState(
   }
   return res.json();
 }
+
+export interface RenderResult {
+  ok: boolean;
+  videoFile: string;
+  transcriptionFile: string;
+  version: number;
+  subtitlesBurned: boolean;
+  duration: number;
+}
+
+export async function renderEditor(
+  jobId: string,
+  fileName: string,
+  state: EditorState,
+  burnSubtitles: boolean
+): Promise<RenderResult> {
+  const res = await fetch(
+    `${API_BASE}/api/editor/${jobId}/${encodeURIComponent(fileName)}/render`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ state, burnSubtitles }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Failed to render edited video");
+  }
+  return res.json();
+}
