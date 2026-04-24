@@ -206,6 +206,59 @@ function burnSubtitles(
 }
 
 /**
+ * Update outputs.json atomically: acquires a lock file, re-reads the manifest,
+ * appends the entry, writes via temp+rename, then releases the lock.
+ *
+ * Prevents lost-update race when two renders complete near-simultaneously.
+ */
+function appendToManifest(
+  manifestPath: string,
+  newEntry: Record<string, unknown>
+): void {
+  const lockPath = `${manifestPath}.lock`;
+  const maxWait = 5000; // ms
+  const start = Date.now();
+
+  // Acquire lock (busy-wait with backoff)
+  while (true) {
+    try {
+      fs.writeFileSync(lockPath, String(process.pid), { flag: "wx" });
+      break;
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException;
+      if (err.code !== "EEXIST") throw err;
+      if (Date.now() - start > maxWait) {
+        // Stale lock? Try to remove and continue
+        try { fs.unlinkSync(lockPath); } catch {}
+        throw new Error("Manifest lock acquisition timed out");
+      }
+      // Sleep briefly via blocking call
+      const sleep = 50 + Math.floor(Math.random() * 50);
+      const until = Date.now() + sleep;
+      while (Date.now() < until) { /* spin */ }
+    }
+  }
+
+  try {
+    let manifest: Array<Record<string, unknown>> = [];
+    if (fs.existsSync(manifestPath)) {
+      try {
+        manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+        if (!Array.isArray(manifest)) manifest = [];
+      } catch {
+        manifest = [];
+      }
+    }
+    manifest.push(newEntry);
+    const tmpPath = `${manifestPath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(manifest, null, 2));
+    fs.renameSync(tmpPath, manifestPath);
+  } finally {
+    try { fs.unlinkSync(lockPath); } catch {}
+  }
+}
+
+/**
  * Find next available version number AND reserve it atomically by creating a
  * zero-byte placeholder file. Prevents concurrent renders from picking the
  * same version slot.
@@ -327,32 +380,32 @@ export async function renderEditorOutput(opts: RenderOptions): Promise<RenderRes
     fs.copyFileSync(finalVideo, outPath);
     fs.copyFileSync(cutTranscription, outTranscriptionPath);
 
-    // Step 5: update outputs.json with new entry (atomic write via temp file + rename)
+    // Step 5: update outputs.json (atomic, lock-protected — prevents lost updates from concurrent renders)
     const manifestPath = path.join(jobDir, "outputs.json");
-    let manifest: Array<Record<string, unknown>> = [];
+
+    // Snapshot current source entry for label/description (read once before lock)
+    let sourceLabel = stem;
+    let sourceDescription = "";
     if (fs.existsSync(manifestPath)) {
       try {
-        manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
-        if (!Array.isArray(manifest)) manifest = [];
-      } catch {
-        manifest = [];
-      }
+        const cur = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+        if (Array.isArray(cur)) {
+          const found = cur.find((m: { file?: unknown }) => m?.file === sourceFile);
+          if (found) {
+            sourceLabel = (typeof found.label === "string" ? found.label : stem);
+            sourceDescription = (typeof found.description === "string" ? found.description : "");
+          }
+        }
+      } catch {}
     }
 
-    const sourceEntry = manifest.find((m) => m.file === sourceFile);
-    const newEntry = {
+    appendToManifest(manifestPath, {
       file: outName,
-      label: `${sourceEntry?.label || stem} — v${version}${shouldBurn ? "" : " (sans ST)"}`,
-      description: (sourceEntry?.description as string) || "",
+      label: `${sourceLabel} — v${version}${shouldBurn ? "" : " (sans ST)"}`,
+      description: sourceDescription,
       transcription: outTranscriptionName,
       subtitlesBurned: shouldBurn,
-    };
-    manifest.push(newEntry);
-
-    // Atomic write: write to temp file, then rename
-    const tmpPath = `${manifestPath}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(tmpPath, JSON.stringify(manifest, null, 2));
-    fs.renameSync(tmpPath, manifestPath);
+    });
   } catch (err) {
     // Clean up reserved slot on error
     try { fs.unlinkSync(outPath); } catch {}

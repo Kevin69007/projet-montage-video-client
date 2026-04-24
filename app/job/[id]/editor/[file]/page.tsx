@@ -245,7 +245,23 @@ export default function EditorPage() {
     [segments]
   );
 
-  // Keyboard shortcuts
+  // "Any edits to apply" — used for the "Appliquer coupes" button
+  const hasEdits = useMemo(
+    () =>
+      state.cuts.length > 0 ||
+      state.deletedSegments.length > 0 ||
+      state.transcription.some((e) => e.deleted) ||
+      state.transcription.some((e) => e.type === "silence" && e.trimTo !== null && e.trimTo !== undefined),
+    [state.cuts, state.deletedSegments, state.transcription]
+  );
+
+  // Refs for latest values — keeps keyboard handler stable across renders
+  const currentTimeRef = useRef(currentTime);
+  const cutsRef = useRef(state.cuts);
+  useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
+  useEffect(() => { cutsRef.current = state.cuts; }, [state.cuts]);
+
+  // Keyboard shortcuts — attach ONCE, read current values via refs
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const target = document.activeElement;
@@ -264,16 +280,17 @@ export default function EditorPage() {
         e.preventDefault();
         handleStep(-0.5);
       } else if (e.code === "KeyC") {
-        actions.addCut(currentTime);
+        actions.addCut(currentTimeRef.current);
       } else if (e.code === "KeyZ") {
-        if (state.cuts.length > 0) {
-          actions.removeCut(state.cuts[state.cuts.length - 1]);
+        const latest = cutsRef.current;
+        if (latest.length > 0) {
+          actions.removeCut(latest[latest.length - 1]);
         }
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [handlePlayPause, handleStep, actions, currentTime, state.cuts]);
+  }, [handlePlayPause, handleStep, actions]);
 
   if (error) {
     return (
@@ -322,9 +339,9 @@ export default function EditorPage() {
             )}
             <button
               onClick={() => handleRender(false)}
-              disabled={isRendering || state.cuts.length === 0 && state.transcription.every((e) => !e.deleted)}
+              disabled={isRendering || !hasEdits}
               className="btn-ghost text-sm disabled:opacity-40"
-              title="Applique les coupes uniquement, sans sous-titres"
+              title={hasEdits ? "Applique les coupes uniquement, sans sous-titres" : "Aucun changement a appliquer"}
             >
               {isRendering ? "Rendu..." : "Appliquer coupes"}
             </button>
