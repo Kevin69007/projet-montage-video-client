@@ -201,7 +201,20 @@ function burnSubtitles(
   const wpl = style.wpl || style.config.wordsPerLine || 3;
   const lines = style.lines || 2;
   const scriptName = style.name === "cove" ? "burn_subtitles_cove.py" : "burn_subtitles.py";
-  const cmd = `FFMPEG_PATH="${ffmpegPath}" FONTS_DIR="${fontsDir}" python3 "${path.join(scriptsDir, scriptName)}" "${cutVideo}" "${transcriptionPath}" "${accent}" "${outputVideo}" ${fontSize} ${wpl} ${lines}`;
+
+  // Build STYLE_JSON payload so the Python script can apply font/position/uppercase/glow
+  const stylePayload = {
+    font: style.config.font,
+    posY: style.posY,
+    uppercase: style.config.textTransform === "uppercase",
+    outlineWidth: style.config.outline?.width ?? 5,
+    // Use glow color for neon-like styles
+    glowColor: style.config.glow?.color || (style.config.animation === "glitch" ? style.config.color : null),
+  };
+
+  const styleJsonEscaped = JSON.stringify(stylePayload).replace(/'/g, "'\\''");
+
+  const cmd = `STYLE_JSON='${styleJsonEscaped}' FFMPEG_PATH="${ffmpegPath}" FONTS_DIR="${fontsDir}" python3 "${path.join(scriptsDir, scriptName)}" "${cutVideo}" "${transcriptionPath}" "${accent}" "${outputVideo}" ${fontSize} ${wpl} ${lines}`;
   execSync(cmd, { stdio: "pipe", maxBuffer: 50 * 1024 * 1024, shell: "/bin/bash" as string });
 }
 

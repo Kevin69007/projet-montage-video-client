@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { chatEditor, getEditorData, renderEditor, saveEditorState } from "@/lib/api";
+import { chatEditor, getDownloadUrl, getEditorData, renderEditor, saveEditorState } from "@/lib/api";
+import type { RenderResult } from "@/lib/api";
 import type { ChatMessage } from "@/lib/editor/chat-types";
 import type { AppliedSubtitleStyle, EditorData, EditorState } from "@/lib/editor/types";
 import {
@@ -69,6 +70,8 @@ export default function EditorPage() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isChatPending, setIsChatPending] = useState(false);
   const [chatError, setChatError] = useState("");
+  // Versions produced from this editor session (post-render)
+  const [renderedVersions, setRenderedVersions] = useState<RenderResult[]>([]);
 
   const videoElRef = useRef<HTMLVideoElement | null>(null);
 
@@ -205,7 +208,7 @@ export default function EditorPage() {
     );
   }, []);
 
-  // Render action — applies edits, produces new video version, returns to results page
+  // Render action — applies edits, produces new version, stays in editor with chat
   const handleRender = useCallback(
     async (burnSubtitles: boolean) => {
       setRenderError("");
@@ -217,20 +220,16 @@ export default function EditorPage() {
         await saveEditorState(jobId, file, state);
         lastSavedUpdatedAtRef.current = state.updatedAt;
         const result = await renderEditor(jobId, file, state, burnSubtitles);
-        // Go to the new version's editor (subtitlesBurned=false → editable;
-        // if burned, go back to results page)
-        if (result.subtitlesBurned) {
-          router.push(`/job/${jobId}`);
-        } else {
-          router.push(`/job/${jobId}/editor/${encodeURIComponent(result.videoFile)}`);
-        }
+        // Stay on the editor — append new version to the list
+        setRenderedVersions((prev) => [...prev, result]);
+        setIsRendering(false);
       } catch (e) {
         const err = e as Error;
         setRenderError(err.message || "Erreur de rendu");
         setIsRendering(false);
       }
     },
-    [jobId, file, state, router]
+    [jobId, file, state]
   );
 
   // Compute segments from cuts
@@ -417,6 +416,48 @@ export default function EditorPage() {
               onChange={actions.updateStyle}
               onToggleSubtitles={setShowSubtitles}
             />
+
+            {/* Rendered versions — appears after first render, lets user preview/download produced versions */}
+            {renderedVersions.length > 0 && (
+              <div className="glass-card p-4 space-y-3 border-purple/30 bg-purple/5">
+                <div className="flex items-center justify-between">
+                  <div className="mono-label">Versions produites ({renderedVersions.length})</div>
+                  <button
+                    onClick={() => router.push(`/job/${jobId}`)}
+                    className="text-xs text-purple-light hover:text-purple-light/80"
+                  >
+                    Voir aux resultats →
+                  </button>
+                </div>
+                {renderedVersions.map((v, i) => {
+                  const url = getDownloadUrl(jobId, v.videoFile);
+                  return (
+                    <div key={`${v.videoFile}-${i}`} className="border border-glass-border p-3 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-bold text-text-primary truncate">
+                            v{v.version} {v.subtitlesBurned ? "(avec sous-titres)" : "(sans sous-titres)"}
+                          </p>
+                          <p className="text-[10px] font-mono text-text-muted truncate">{v.videoFile} · {v.duration.toFixed(1)}s</p>
+                        </div>
+                        <a
+                          href={url}
+                          download={v.videoFile}
+                          className="btn-ghost text-[10px] py-1 px-2 shrink-0"
+                        >
+                          Telecharger
+                        </a>
+                      </div>
+                      <video src={url} controls className="w-full max-h-72 object-contain bg-black" preload="metadata" />
+                      <p className="text-[10px] text-text-muted italic">
+                        Modifie l&apos;edition ci-contre puis clique &laquo;Appliquer&raquo; pour produire une nouvelle version.
+                        Utilise le chat IA pour suggerer des changements.
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Right: transcript + markers */}

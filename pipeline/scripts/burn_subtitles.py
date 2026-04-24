@@ -11,11 +11,34 @@ def rgb_to_ass(hex_color):
     b = int(hex_color[5:7], 16)
     return f"&H00{b:02X}{g:02X}{r:02X}&"
 
-def generate_ass(words, accent_hex, font_size=54, wpl=3, lines=2, font="Big Shoulders Display"):
-    """Generate ASS subtitle content with word-level karaoke highlighting."""
+def generate_ass(words, accent_hex, font_size=54, wpl=3, lines=2,
+                 font="Big Shoulders Display", pos_y=75, uppercase=True,
+                 outline_width=5, glow_color=None):
+    """Generate ASS subtitle content with word-level karaoke highlighting.
+
+    pos_y: vertical position 0-100 (% from top). 0=top, 50=center, 100=bottom.
+           Mapped to ASS Alignment + MarginV.
+    uppercase: when True, force uppercase on all words.
+    glow_color: hex color for glow shadow (e.g. neon style); None = no extra glow.
+    """
     accent = rgb_to_ass(accent_hex)
     white = "&H00FFFFFF&"
     outline_color = "&H00000000&"
+
+    # Map pos_y (0-100, % from top) to ASS Alignment + MarginV
+    # Alignment 8=top, 5=center, 2=bottom (numpad layout, all centered horizontally)
+    if pos_y <= 33:
+        alignment = 8
+        # MarginV from top = pos_y % of 1920px
+        margin_v = int((pos_y / 100) * 1920)
+    elif pos_y >= 67:
+        alignment = 2
+        # MarginV from bottom = (100 - pos_y) % of 1920px
+        margin_v = int(((100 - pos_y) / 100) * 1920)
+    else:
+        alignment = 5
+        # MarginV ignored for centered alignment, but PlayResY is 1920 — use pixel offset from center
+        margin_v = int(((pos_y - 50) / 100) * 1920)
 
     header = f"""[Script Info]
 Title: Subtitles
@@ -26,7 +49,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font},{font_size},{white},&H000000FF&,{outline_color},&H80000000&,-1,0,0,0,100,100,2,0,1,5,2,2,40,40,180,1
+Style: Default,{font},{font_size},{white},&H000000FF&,{outline_color},&H80000000&,-1,0,0,0,100,100,2,0,1,{outline_width},2,{alignment},40,40,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -69,24 +92,28 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     if current:
         blocks.append(current)
 
+    def fmt_word(text):
+        return text.upper() if uppercase else text
+
+    # Glow effect: prepend a global override at start of text
+    glow_override = ""
+    if glow_color:
+        glow_ass = rgb_to_ass(glow_color)
+        # Use \shad for shadow + \3c for outline color (neon glow approximation)
+        glow_override = f"{{\\3c{glow_ass}\\shad4}}"
+
     for block in blocks:
-        # For each word in the block, create an event showing all words
-        # with the active word highlighted
         for active_idx, active_word in enumerate(block):
             start = format_time(active_word['start'])
             end = format_time(active_word['end'])
 
-            # Build text with line breaks every wpl words
-            parts = []
+            parts = [glow_override] if glow_override else []
             for j, w in enumerate(block):
-                word_text = (w.get('word') or w.get('text', '')).upper()
+                word_text = fmt_word((w.get('word') or w.get('text', '')))
                 if j == active_idx:
-                    # Active word: accent color + slightly larger
                     parts.append(f"{{\\c{accent}\\fscx110\\fscy110}}{word_text}{{\\c{white}\\fscx100\\fscy100}}")
                 else:
                     parts.append(word_text)
-
-                # Add line break every wpl words (except at the end)
                 if (j + 1) % wpl == 0 and j + 1 < len(block):
                     parts.append("\\N")
                 else:
@@ -95,17 +122,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             text = "".join(parts).strip()
             events.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
 
-        # Also show the block between words (gaps)
         for i in range(len(block) - 1):
             gap_start = block[i]['end']
             gap_end = block[i+1]['start']
             if gap_end - gap_start > 0.05:
                 start = format_time(gap_start)
                 end = format_time(gap_end)
-                # Show block with no highlight
-                parts = []
+                parts = [glow_override] if glow_override else []
                 for j, w in enumerate(block):
-                    parts.append((w.get('word') or w.get('text', '')).upper())
+                    parts.append(fmt_word((w.get('word') or w.get('text', ''))))
                     if (j + 1) % wpl == 0 and j + 1 < len(block):
                         parts.append("\\N")
                     else:
@@ -146,7 +171,11 @@ def burn_subtitles(video_path, ass_path, output_path):
     return output_path
 
 if __name__ == '__main__':
-    # Args: video_path transcription_json accent_hex output_path [font_size] [wpl] [lines]
+    # Args:
+    #   Required: video_path transcription_json accent_hex output_path
+    #   Optional positional: [font_size] [wpl] [lines]
+    #   Optional via env STYLE_JSON: full style config as JSON
+    #     {"font": "...", "posY": 75, "uppercase": true, "outlineWidth": 5, "glowColor": "#00FFFF"}
     video_path = sys.argv[1]
     trans_path = sys.argv[2]
     accent_hex = sys.argv[3]
@@ -155,10 +184,32 @@ if __name__ == '__main__':
     wpl = int(sys.argv[6]) if len(sys.argv) > 6 else 3
     lines_count = int(sys.argv[7]) if len(sys.argv) > 7 else 2
 
+    # Read advanced style config from env (allows passing complex JSON without shell escaping)
+    font = "Big Shoulders Display"
+    pos_y = 75
+    uppercase = True
+    outline_width = 5
+    glow_color = None
+    style_json_env = os.environ.get('STYLE_JSON')
+    if style_json_env:
+        try:
+            cfg = json.loads(style_json_env)
+            font = cfg.get('font', font)
+            pos_y = float(cfg.get('posY', pos_y))
+            uppercase = bool(cfg.get('uppercase', uppercase))
+            outline_width = int(cfg.get('outlineWidth', outline_width))
+            glow_color = cfg.get('glowColor', glow_color)
+        except (ValueError, TypeError) as e:
+            print(f"Warning: invalid STYLE_JSON env var ({e}), using defaults", file=sys.stderr)
+
     with open(trans_path, 'r') as f:
         words = json.load(f)
 
-    ass_content = generate_ass(words, accent_hex, font_size, wpl, lines_count)
+    ass_content = generate_ass(
+        words, accent_hex, font_size, wpl, lines_count,
+        font=font, pos_y=pos_y, uppercase=uppercase,
+        outline_width=outline_width, glow_color=glow_color,
+    )
     ass_path = output_path.rsplit('.', 1)[0] + '.ass'
     with open(ass_path, 'w', encoding='utf-8') as f:
         f.write(ass_content)
