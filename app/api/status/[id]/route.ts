@@ -17,5 +17,24 @@ export async function GET(
   }
 
   const status = JSON.parse(fs.readFileSync(statusPath, "utf-8"));
+
+  // Merge in fresh outputs.json so editor-rendered versions appear without re-running pipeline
+  const outputsPath = path.join(jobDir, "outputs.json");
+  if (fs.existsSync(outputsPath)) {
+    try {
+      const outputs = JSON.parse(fs.readFileSync(outputsPath, "utf-8"));
+      if (Array.isArray(outputs)) {
+        const outputDir = path.join(jobDir, "output");
+        // Filter to outputs whose files actually exist on disk
+        status.outputs = outputs.filter((o: { file?: unknown }) => {
+          if (typeof o?.file !== "string") return false;
+          return fs.existsSync(path.join(outputDir, o.file));
+        });
+      }
+    } catch (e) {
+      console.error("Failed to merge outputs.json into status:", e);
+    }
+  }
+
   return NextResponse.json(status);
 }

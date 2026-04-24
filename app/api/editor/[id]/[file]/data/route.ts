@@ -93,6 +93,18 @@ export async function GET(
       }
     }
 
+    // Load chat history if it exists (Phase 5)
+    let chatHistory: unknown[] = [];
+    const chatPath = path.join(jobDir, "chats", `${decodedFile}.json`);
+    if (fs.existsSync(chatPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(chatPath, "utf-8"));
+        if (Array.isArray(parsed)) chatHistory = parsed;
+      } catch (e) {
+        console.error("Failed to parse chat history:", e);
+      }
+    }
+
     return NextResponse.json({
       jobId: id,
       file: decodedFile,
@@ -102,6 +114,7 @@ export async function GET(
       transcription,
       styles,
       savedEdits,
+      chatHistory,
       subtitlesBurned,
     });
   } catch (err: unknown) {

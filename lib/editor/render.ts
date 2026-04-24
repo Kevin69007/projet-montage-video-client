@@ -118,8 +118,8 @@ function applyCuts(
 
 /**
  * Remap transcription to the new cut video timeline.
- * - Drops entries fully inside deleted segments
  * - Drops deleted words / deleted silences
+ * - Includes entries that overlap with kept segments (clipped to segment bounds)
  * - Applies trimTo for silences
  * - Shifts remaining timestamps to start at 0 of the concat result
  */
@@ -135,21 +135,27 @@ function remapTranscription(
 
     for (const entry of transcription) {
       if (entry.type === "word" && entry.deleted) continue;
+      if (entry.type === "silence" && entry.deleted) continue;
 
-      // Only include entries that fall inside this segment
-      const within = entry.start >= seg.start && entry.end <= seg.end;
-      if (!within) continue;
+      // Include entries that overlap with this segment (clip to bounds)
+      const overlap =
+        entry.start < seg.end && entry.end > seg.start;
+      if (!overlap) continue;
+
+      const clippedStart = Math.max(entry.start, seg.start);
+      const clippedEnd = Math.min(entry.end, seg.end);
+      if (clippedEnd <= clippedStart) continue;
 
       if (entry.type === "silence") {
-        if (entry.deleted) continue;
         const trim = typeof entry.trimTo === "number" ? entry.trimTo : null;
-        const duration = trim !== null ? trim : entry.duration;
+        const naturalDuration = clippedEnd - clippedStart;
+        const duration = trim !== null ? Math.min(trim, naturalDuration) : naturalDuration;
         if (duration <= 0) continue;
         out.push({
           id: entry.id,
           type: "silence",
-          start: cursor + (entry.start - seg.start),
-          end: cursor + (entry.start - seg.start) + duration,
+          start: cursor + (clippedStart - seg.start),
+          end: cursor + (clippedStart - seg.start) + duration,
           duration,
         } as TranscriptSilence);
       } else {
@@ -157,8 +163,8 @@ function remapTranscription(
           id: entry.id,
           type: "word",
           word: entry.word,
-          start: cursor + (entry.start - seg.start),
-          end: cursor + (entry.end - seg.start),
+          start: cursor + (clippedStart - seg.start),
+          end: cursor + (clippedEnd - seg.start),
           lineBreak: entry.lineBreak,
         } as TranscriptWord);
       }

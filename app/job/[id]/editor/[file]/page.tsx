@@ -89,6 +89,10 @@ export default function EditorPage() {
           ? d.savedEdits
           : buildInitialState(d.transcription, defaultStyle(d));
         actions.init(fresh);
+        // Load persisted chat history
+        if (Array.isArray(d.chatHistory) && d.chatHistory.length > 0) {
+          setChatMessages(d.chatHistory as ChatMessage[]);
+        }
       })
       .catch((e) => setError(e.message || "Erreur de chargement"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -207,8 +211,11 @@ export default function EditorPage() {
       setRenderError("");
       setIsRendering(true);
       try {
+        // Cancel any pending auto-save (we're saving manually below)
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
         // Make sure latest state is saved first
         await saveEditorState(jobId, file, state);
+        lastSavedUpdatedAtRef.current = state.updatedAt;
         const result = await renderEditor(jobId, file, state, burnSubtitles);
         // Go to the new version's editor (subtitlesBurned=false → editable;
         // if burned, go back to results page)

@@ -620,17 +620,42 @@ Reponds TOUJOURS en francais dans le champ \`reply\`. Sois concis.`;
  * Builds the user message for one chat turn (sends Kimi the current state + new message).
  */
 export function buildEditorReworkUserMessage({ state, userMessage }) {
-  // Trim transcription for prompt: only include non-deleted words + all silences
-  const compact = state.transcription.slice(0, 400); // cap to prevent huge prompts
-  return `# STATE ACTUEL (extrait)
+  // Cap transcription at ~400 entries to keep prompt bounded (each entry ~20 tokens)
+  // Always pass valid JSON (no string slicing mid-value).
+  const MAX_ENTRIES = 400;
+  const compact = state.transcription.length > MAX_ENTRIES
+    ? state.transcription.slice(0, MAX_ENTRIES)
+    : state.transcription;
 
-## Transcription (${state.transcription.length} entrees, ${compact.length} montrees)
-${JSON.stringify(compact, null, 2).slice(0, 8000)}
+  const truncated = state.transcription.length > MAX_ENTRIES
+    ? `\n[NOTE: transcription tronquee aux ${MAX_ENTRIES} premieres entrees sur ${state.transcription.length}]`
+    : "";
 
-## Cuts : ${JSON.stringify(state.cuts)}
+  const markersBrief = state.markers.map(m => ({
+    time: m.time,
+    comment: m.comment,
+    author: m.author,
+    resolved: m.resolved,
+  }));
+
+  const styleBrief = {
+    name: state.style.name,
+    accentColor: state.style.accentColor,
+    posY: state.style.posY,
+    sizeOverride: state.style.sizeOverride,
+    wpl: state.style.wpl,
+    lines: state.style.lines,
+  };
+
+  return `# STATE ACTUEL${truncated}
+
+## Transcription (${state.transcription.length} entrees)
+${JSON.stringify(compact)}
+
+## Cuts (s) : ${JSON.stringify(state.cuts)}
 ## Segments supprimes : ${JSON.stringify(state.deletedSegments)}
-## Markers : ${JSON.stringify(state.markers.map(m => ({ time: m.time, comment: m.comment })))}
-## Style : ${JSON.stringify({ name: state.style.name, accentColor: state.style.accentColor, posY: state.style.posY, sizeOverride: state.style.sizeOverride, wpl: state.style.wpl })}
+## Markers : ${JSON.stringify(markersBrief)}
+## Style : ${JSON.stringify(styleBrief)}
 
 # DEMANDE UTILISATEUR
 ${userMessage}

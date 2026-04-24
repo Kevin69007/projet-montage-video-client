@@ -76,6 +76,16 @@ export interface EditorState {
   updatedAt: string;
 }
 
+/** Chat message shape (also re-exported from chat-types.ts as ChatMessage). */
+export interface ChatHistoryEntry {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+  proposedState?: EditorState;
+  appliedAt?: string;
+}
+
 /** Response from GET /api/editor/[id]/[file]/data */
 export interface EditorData {
   jobId: string;
@@ -86,5 +96,6 @@ export interface EditorData {
   transcription: TranscriptEntry[];
   styles: Record<string, SubtitleStyle>;
   savedEdits: EditorState | null;
+  chatHistory: ChatHistoryEntry[];
   subtitlesBurned: boolean;
 }
