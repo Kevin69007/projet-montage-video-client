@@ -1,4 +1,5 @@
 import type { EditorData, EditorState } from "./editor/types";
+import type { ChatMessage, ChatResponse } from "./editor/chat-types";
 
 const API_BASE = "";
 
@@ -171,6 +172,28 @@ export async function renderEditor(
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || "Failed to render edited video");
+  }
+  return res.json();
+}
+
+export async function chatEditor(
+  jobId: string,
+  fileName: string,
+  state: EditorState,
+  history: ChatMessage[],
+  userMessage: string
+): Promise<ChatResponse> {
+  const res = await fetch(
+    `${API_BASE}/api/editor/${jobId}/${encodeURIComponent(fileName)}/chat`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ state, history, userMessage }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Chat request failed");
   }
   return res.json();
 }

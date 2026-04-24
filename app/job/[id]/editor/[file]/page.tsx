@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { getEditorData, renderEditor, saveEditorState } from "@/lib/api";
+import { chatEditor, getEditorData, renderEditor, saveEditorState } from "@/lib/api";
+import type { ChatMessage } from "@/lib/editor/chat-types";
 import type { AppliedSubtitleStyle, EditorData, EditorState } from "@/lib/editor/types";
 import {
   buildInitialState,
@@ -16,6 +17,7 @@ import TranscriptPanel from "@/components/editor/TranscriptPanel";
 import StyleSwitcher from "@/components/editor/StyleSwitcher";
 import MarkersPanel from "@/components/editor/MarkersPanel";
 import SegmentsList from "@/components/editor/SegmentsList";
+import ChatPanel from "@/components/editor/ChatPanel";
 
 const DEFAULT_STYLE_NAME = "hormozi";
 const SAVE_DEBOUNCE_MS = 1500;
@@ -64,6 +66,9 @@ export default function EditorPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [isRendering, setIsRendering] = useState(false);
   const [renderError, setRenderError] = useState("");
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [isChatPending, setIsChatPending] = useState(false);
+  const [chatError, setChatError] = useState("");
 
   const videoElRef = useRef<HTMLVideoElement | null>(null);
 
@@ -151,6 +156,50 @@ export default function EditorPage() {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
   }, [state, jobId, file, data]);
+
+  // Chat: send message to Kimi
+  const handleChatSend = useCallback(
+    async (userMessage: string) => {
+      setChatError("");
+      setIsChatPending(true);
+      const userMsg: ChatMessage = {
+        id: `msg_${Date.now()}_u_${Math.random().toString(36).slice(2, 7)}`,
+        role: "user",
+        content: userMessage,
+        createdAt: new Date().toISOString(),
+      };
+      setChatMessages((prev) => [...prev, userMsg]);
+
+      try {
+        const res = await chatEditor(jobId, file, state, chatMessages, userMessage);
+        setChatMessages((prev) => [...prev, res.message]);
+      } catch (e) {
+        const err = e as Error;
+        setChatError(err.message || "Erreur chat");
+      } finally {
+        setIsChatPending(false);
+      }
+    },
+    [jobId, file, state, chatMessages]
+  );
+
+  const handleAcceptProposal = useCallback(
+    (msg: ChatMessage) => {
+      if (!msg.proposedState) return;
+      actions.init(msg.proposedState);
+      setChatMessages((prev) =>
+        prev.map((m) => (m.id === msg.id ? { ...m, appliedAt: new Date().toISOString() } : m))
+      );
+    },
+    [actions]
+  );
+
+  const handleRejectProposal = useCallback((msg: ChatMessage) => {
+    // Remove the proposal (keep the text reply visible but drop proposedState)
+    setChatMessages((prev) =>
+      prev.map((m) => (m.id === msg.id ? { ...m, proposedState: undefined } : m))
+    );
+  }, []);
 
   // Render action — applies edits, produces new video version, returns to results page
   const handleRender = useCallback(
@@ -358,6 +407,18 @@ export default function EditorPage() {
               onTrimSilence={actions.trimSilence}
               onToggleLineBreak={actions.toggleLineBreak}
             />
+            <ChatPanel
+              messages={chatMessages}
+              isPending={isChatPending}
+              onSend={handleChatSend}
+              onAcceptProposal={handleAcceptProposal}
+              onRejectProposal={handleRejectProposal}
+            />
+            {chatError && (
+              <div className="border border-red-500/30 bg-red-500/5 p-3">
+                <p className="text-xs text-red-400">{chatError}</p>
+              </div>
+            )}
             <MarkersPanel
               markers={state.markers}
               currentTime={currentTime}

@@ -540,6 +540,106 @@ export function coachToolError(toolName, result) {
 }
 
 // ============================================================================
+// EDITOR REWORK PROMPT (used by /api/editor/[id]/[file]/chat)
+// ============================================================================
+
+/**
+ * Builds the Kimi prompt for editor rework.
+ * Kimi is given the current EditorState + chat history + a new user comment,
+ * and asked to return a JSON patch describing changes to apply.
+ *
+ * Output format (Kimi must produce):
+ * {
+ *   "reply": "... explanation in French ...",
+ *   "changes": {  // optional — only include if any changes
+ *     "deletedWordIds": ["w_12", "w_13"],
+ *     "restoredWordIds": ["w_44"],
+ *     "deletedSilenceIds": ["s_3"],
+ *     "trimSilences": [{"id": "s_7", "trimTo": 0.3}],
+ *     "lineBreakToggles": ["w_20"],
+ *     "addCuts": [12.5, 45.2],
+ *     "removeCuts": [18.0],
+ *     "toggleSegmentDeletes": ["seg_2"],
+ *     "style": {"accentColor": "#FF0000", "sizeOverride": 72, "posY": 80}
+ *   }
+ * }
+ */
+export function buildEditorReworkSystem({ stylesJson }) {
+  return `# IDENTITE
+Tu es un monteur video senior. L'utilisateur edite une video courte (reel/teaser) dans une interface d'edition. Il te parle et decrit ce qu'il veut changer. Tu proposes des modifications precises au state d'edition, en retournant un JSON structure.
+
+# CE QUE TU RECOIS
+1. Le state d'edition actuel (transcription word-level, cuts, segments supprimes, marqueurs, style)
+2. L'historique de la conversation
+3. Un message texte de l'utilisateur
+
+# CE QUE TU RENVOIES
+UN SEUL JSON (pas de texte libre autour, pas de backticks, juste le JSON valide) :
+\`\`\`json
+{
+  "reply": "Phrase courte en francais expliquant ce que tu fais / proposes.",
+  "changes": {
+    "deletedWordIds": ["w_X", "w_Y"],
+    "restoredWordIds": [],
+    "deletedSilenceIds": [],
+    "trimSilences": [{"id": "s_Z", "trimTo": 0.3}],
+    "lineBreakToggles": [],
+    "addCuts": [12.5],
+    "removeCuts": [],
+    "toggleSegmentDeletes": [],
+    "style": {"accentColor": "#XX", "sizeOverride": 80, "posY": 75, "wpl": 4}
+  }
+}
+\`\`\`
+
+\`changes\` est optionnel. Si tu ne proposes aucune modification (par exemple question de clarification), omet le champ \`changes\` entierement.
+
+Le champ \`reply\` est OBLIGATOIRE — l'utilisateur le verra directement.
+
+# REGLES
+- Si l'utilisateur dit "supprime le mot X", trouve son \`id\` dans la transcription et ajoute-le a \`deletedWordIds\`.
+- Si l'utilisateur dit "coupe a 12s", ajoute 12 a \`addCuts\`.
+- Si l'utilisateur dit "supprime le segment X", ajoute son id a \`toggleSegmentDeletes\`.
+- Pour le style : ne mets dans \`style\` QUE les champs qui changent. Les champs omis ne seront pas modifies.
+- Si l'utilisateur pose une question sans demander de changement, renvoie juste \`reply\` sans \`changes\`.
+- Si la demande est ambigue, pose une question dans \`reply\` sans proposer de changement.
+
+# STYLES DISPONIBLES
+${stylesJson}
+
+# COMPETENCE ATTENDUE
+- Identifier precisement les mots a couper depuis leur contenu textuel (pas juste par index)
+- Comprendre les hesitations, repetitions, faux-departs
+- Proposer des cuts intelligents (sur phrases completes)
+- Suggerer un style adapte au contenu si demande ("style plus sobre", "plus fun", etc.)
+
+Reponds TOUJOURS en francais dans le champ \`reply\`. Sois concis.`;
+}
+
+/**
+ * Builds the user message for one chat turn (sends Kimi the current state + new message).
+ */
+export function buildEditorReworkUserMessage({ state, userMessage }) {
+  // Trim transcription for prompt: only include non-deleted words + all silences
+  const compact = state.transcription.slice(0, 400); // cap to prevent huge prompts
+  return `# STATE ACTUEL (extrait)
+
+## Transcription (${state.transcription.length} entrees, ${compact.length} montrees)
+${JSON.stringify(compact, null, 2).slice(0, 8000)}
+
+## Cuts : ${JSON.stringify(state.cuts)}
+## Segments supprimes : ${JSON.stringify(state.deletedSegments)}
+## Markers : ${JSON.stringify(state.markers.map(m => ({ time: m.time, comment: m.comment })))}
+## Style : ${JSON.stringify({ name: state.style.name, accentColor: state.style.accentColor, posY: state.style.posY, sizeOverride: state.style.sizeOverride, wpl: state.style.wpl })}
+
+# DEMANDE UTILISATEUR
+${userMessage}
+
+# A FAIRE
+Renvoie UNIQUEMENT un JSON au format specifie dans le system prompt. Pas de texte autour. Pas de backticks.`;
+}
+
+// ============================================================================
 // TASK SUMMARY (used by reminders to remind Kimi of original parameters)
 // ============================================================================
 
