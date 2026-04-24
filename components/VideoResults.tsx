@@ -14,6 +14,7 @@ export default function VideoResults({
   outputs,
   message,
 }: VideoResultsProps) {
+  const hasEditable = outputs.some((o) => !o.subtitlesBurned && o.transcription);
   return (
     <div className="space-y-6">
       {/* Summary message */}
@@ -21,6 +22,15 @@ export default function VideoResults({
         <div className="glass-card p-4">
           <p className="text-sm text-text-body whitespace-pre-wrap">
             {message}
+          </p>
+        </div>
+      )}
+
+      {/* Editor hint banner */}
+      {hasEditable && (
+        <div className="glass-card p-4 border-purple/30 bg-purple/5">
+          <p className="text-sm text-text-body">
+            <strong className="text-purple-light">Etape suivante</strong> — clique sur <strong>Editer</strong> pour ajuster les sous-titres, couper la video, ajouter des marqueurs, ou demander a Kimi de retravailler la sequence.
           </p>
         </div>
       )}

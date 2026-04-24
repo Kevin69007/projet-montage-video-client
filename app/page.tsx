@@ -119,7 +119,17 @@ export default function Home() {
         {mode === "video" && (
           <>
             <PromptInput value={prompt} onChange={setPrompt} />
-            <StyleSelector value={style} onChange={setStyle} />
+
+            {/* Style selector — demoted (chosen later in editor) */}
+            <details className="glass-card p-3">
+              <summary className="cursor-pointer text-xs text-text-muted hover:text-text-primary">
+                <span className="font-mono uppercase tracking-wide">Style sous-titres</span>
+                <span className="opacity-50 ml-2">(optionnel — tu pourras le choisir dans l&apos;editeur)</span>
+              </summary>
+              <div className="mt-3">
+                <StyleSelector value={style} onChange={setStyle} />
+              </div>
+            </details>
 
             {/* Video type, duration, format, language */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
