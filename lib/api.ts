@@ -1,4 +1,4 @@
-import type { EditorData } from "./editor/types";
+import type { EditorData, EditorState } from "./editor/types";
 
 const API_BASE = "";
 
@@ -121,6 +121,26 @@ export async function getEditorData(jobId: string, fileName: string): Promise<Ed
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || "Failed to load editor data");
+  }
+  return res.json();
+}
+
+export async function saveEditorState(
+  jobId: string,
+  fileName: string,
+  state: EditorState
+): Promise<{ ok: boolean; savedAt: string }> {
+  const res = await fetch(
+    `${API_BASE}/api/editor/${jobId}/${encodeURIComponent(fileName)}/save`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Failed to save editor state");
   }
   return res.json();
 }
