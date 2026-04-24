@@ -667,14 +667,29 @@ async function main() {
     try {
       outputs = JSON.parse(fs.readFileSync(outputsJsonPath, "utf-8"));
       if (!Array.isArray(outputs)) outputs = [outputs];
-      // Normalize entries: ensure file/label/description are always strings
+      // Normalize entries: ensure file/label/description are always strings.
+      // Preserve transcription + subtitlesBurned fields for the editor.
       outputs = outputs
         .filter(e => e && typeof e.file === "string" && e.file.length > 0)
-        .map(e => ({
-          file: e.file,
-          label: (typeof e.label === "string" && e.label.trim()) || e.file.replace(/\.[^.]+$/, "").replace(/[_-]/g, " "),
-          description: typeof e.description === "string" ? e.description : "",
-        }));
+        .map(e => {
+          const normalized = {
+            file: e.file,
+            label: (typeof e.label === "string" && e.label.trim()) || e.file.replace(/\.[^.]+$/, "").replace(/[_-]/g, " "),
+            description: typeof e.description === "string" ? e.description : "",
+          };
+          // Editor metadata: only include if valid
+          if (typeof e.transcription === "string" && e.transcription.length > 0) {
+            const transcriptionPath = path.join(outputDir, e.transcription);
+            if (fs.existsSync(transcriptionPath)) {
+              normalized.transcription = e.transcription;
+            } else {
+              addLog(`Avertissement: transcription "${e.transcription}" introuvable pour ${e.file}`);
+            }
+          }
+          // subtitlesBurned: default to false for video outputs (Phase 1 shift)
+          normalized.subtitlesBurned = e.subtitlesBurned === true;
+          return normalized;
+        });
       addLog(`Manifeste trouve: ${outputs.length} fichier(s)`);
     } catch (e) {
       addLog(`Erreur lecture outputs.json: ${e.message}`);
@@ -683,17 +698,27 @@ async function main() {
 
   // Fallback: scan output dir
   if (outputs.length === 0 && fs.existsSync(outputDir)) {
-    const files = fs.readdirSync(outputDir).filter(f =>
+    const allFiles = fs.readdirSync(outputDir);
+    const mediaFiles = allFiles.filter(f =>
       /\.(mp4|mov|avi|mkv|webm|jpg|jpeg|png)$/i.test(f)
     );
-    if (files.length > 0) {
-      outputs = files.map(f => ({
-        file: f,
-        label: f.replace(/\.[^.]+$/, "").replace(/[_-]/g, " "),
-        description: "",
-      }));
+    if (mediaFiles.length > 0) {
+      outputs = mediaFiles.map(f => {
+        const base = f.replace(/\.[^.]+$/, "");
+        // Try to find a matching transcription file (same stem, .json extension)
+        const transcriptionCandidate = `${base}_transcription.json`;
+        const hasTranscription = allFiles.includes(transcriptionCandidate);
+        const isVideo = /\.(mp4|mov|avi|mkv|webm)$/i.test(f);
+        return {
+          file: f,
+          label: base.replace(/[_-]/g, " "),
+          description: "",
+          ...(hasTranscription ? { transcription: transcriptionCandidate } : {}),
+          subtitlesBurned: !isVideo ? undefined : false,
+        };
+      });
       fs.writeFileSync(outputsJsonPath, JSON.stringify(outputs, null, 2));
-      addLog(`Fallback: ${files.length} fichier(s) trouves dans output/`);
+      addLog(`Fallback: ${mediaFiles.length} fichier(s) trouves dans output/`);
     }
   }
 

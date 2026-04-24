@@ -1,11 +1,11 @@
 "use client";
 
-import { getDownloadUrl } from "@/lib/api";
+import { getDownloadUrl, type JobOutput } from "@/lib/api";
 import { useState } from "react";
 
 interface VideoResultsProps {
   jobId: string;
-  outputs: { file: string; label: string; description: string }[];
+  outputs: JobOutput[];
   message: string;
 }
 
@@ -43,7 +43,7 @@ function OutputCard({
   index,
 }: {
   jobId: string;
-  output: { file: string; label: string; description: string };
+  output: JobOutput;
   index: number;
 }) {
   const [copied, setCopied] = useState(false);

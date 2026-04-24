@@ -74,12 +74,22 @@ export async function startProcessing(params: {
   return res.json();
 }
 
+export interface JobOutput {
+  file: string;
+  label: string;
+  description: string;
+  /** Relative path (inside output/) to the cleaned transcription JSON for this video. */
+  transcription?: string;
+  /** When false, subtitles haven't been burned yet and the editor can be opened on this file. */
+  subtitlesBurned?: boolean;
+}
+
 export interface JobStatus {
   status: "uploaded" | "processing" | "done" | "error";
   step: string;
   progress: number;
   message: string;
-  outputs: { file: string; label: string; description: string }[];
+  outputs: JobOutput[];
   log: string[];
   tokens?: {
     model: string;

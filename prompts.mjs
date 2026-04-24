@@ -59,7 +59,25 @@ NE JAMAIS utiliser Write pour generer des videos/images/audio → utilise Bash +
 
 # REGLE D'OR
 A la FIN de la tache, tu DOIS appeler Write sur outputs.json avec un tableau JSON valide.
-Format : [{"file": "nom.mp4", "label": "Titre", "description": "Description Instagram"}]
+Format pour MODE VIDEO :
+\`\`\`json
+[
+  {
+    "file": "reel_1.mp4",
+    "label": "Titre court",
+    "description": "Description Instagram longue",
+    "transcription": "reel_1_transcription.json",
+    "subtitlesBurned": false
+  }
+]
+\`\`\`
+
+Le champ \`transcription\` DOIT pointer vers un fichier JSON copie dans output/.
+Le champ \`subtitlesBurned: false\` indique que les sous-titres seront ajoutes plus tard dans l'editeur.
+
+Format pour MODE MINIATURE : [{"file":"miniature.jpg","label":"...","description":""}]
+(pas besoin de transcription pour les miniatures).
+
 Sans outputs.json valide, tout le travail est perdu.
 
 # SCRIPTS DISPONIBLES — COMMANDES EXACTES
@@ -133,6 +151,10 @@ ${stylesJson}
 
 # PIPELINE VIDEO — SEQUENCE OBLIGATOIRE
 
+**⚠️ IMPORTANT : Les sous-titres ne sont PAS brules dans cette pipeline.**
+L'utilisateur editera les sous-titres dans une interface dediee APRES cette etape.
+Tu dois UNIQUEMENT produire : (1) une video coupee SANS sous-titres, (2) sa transcription nettoyee en JSON.
+
 Pour un TEASER ou REEL :
 
 \`\`\`
@@ -144,36 +166,72 @@ ETAPE 2 : Transcrire l'original
 
 ETAPE 3 : Lire la transcription pour planifier
   Read : "<work>/orig.json"
-  Analyser : phrases completes (finissant par . ! ?), hook fort, moments marquants
+  Identifier : hook fort, moments marquants, punchlines
+  **NETTOYAGE AGRESSIF** : repere aussi tous les elements a SUPPRIMER (voir section NETTOYAGE)
   Calculer : total = sum(end - start) de tes segments. DOIT etre <= duree_cible + 3s
 
 ETAPE 4 : Couper la video (concat FILTER, jamais demuxer)
   Bash : ffmpeg avec les segments choisis + crop si format 9:16
+  Segments doivent EXCLURE : hesitations, silences morts, faux-departs, repetitions
 
 ETAPE 5 : ⚠️ RE-TRANSCRIRE LA VIDEO COUPEE (pas l'originale !)
-  Bash : python3 transcribe.py --video "<work>/cut.mp4" --output "<work>/cut.json" --language fr
+  Bash : python3 transcribe.py --video "<work>/cut.mp4" --output "<work>/cut_transcription.json" --language fr
+  Cette transcription sera sauvegardee pour l'editeur.
 
-ETAPE 6 : Bruler les sous-titres avec la NOUVELLE transcription
-  Bash : burn_subtitles.py sur cut.mp4 avec cut.json
-
-ETAPE 7 (optionnel) : Generer text frame + concat
-  Bash : generate_text_frame.py puis ffmpeg concat
-
-ETAPE 8 : Copier vers output + ecrire outputs.json
-  Bash : cp "<work>/final.mp4" "<output_dir>/"
-  Write : outputs.json avec [{"file":"final.mp4","label":"...","description":"..."}]
+ETAPE 6 : Copier vers output + ecrire outputs.json (PAS de sous-titres)
+  Bash : cp "<work>/cut.mp4" "<output_dir>/reel_1.mp4"
+  Bash : cp "<work>/cut_transcription.json" "<output_dir>/reel_1_transcription.json"
+  Write : outputs.json au format suivant (avec transcription et subtitlesBurned: false) :
+  \`\`\`json
+  [
+    {
+      "file": "reel_1.mp4",
+      "label": "Reel 30s — [titre descriptif]",
+      "description": "Description Instagram...",
+      "transcription": "reel_1_transcription.json",
+      "subtitlesBurned": false
+    }
+  ]
+  \`\`\`
 \`\`\`
+
+**NE LANCE PAS burn_subtitles.py NI generate_text_frame.py** sauf si l'utilisateur te demande explicitement "avec sous-titres" dans son prompt. Sinon, les sous-titres seront ajoutes plus tard dans l'editeur.
+
+# NETTOYAGE AGRESSIF — REGLES CRITIQUES
+
+Le produit final doit etre **PARFAIT pour les reseaux sociaux**. AUCUNE tolerance pour :
+
+## A supprimer SYSTEMATIQUEMENT
+- **Hesitations** : "euh", "euhh", "euhhh", "emmm", "mmh", "hmm", "heu"
+- **Tics de langage** : "ben", "bah", "donc euh", "voila", "tu vois", "genre" (quand parasitaires)
+- **Faux-departs** : phrase commencee puis reprise (ex: "le... le truc c'est que...")
+- **Repetitions** : meme mot repete consecutivement sans effet stylistique ("je je je pense...")
+- **Silences morts** : pause > 0.4s entre mots sans intention dramatique
+- **Bruits parasites** : soupirs, respirations marquees, bruits de bouche
+- **Whisper annotations** : [BREATHING], (inaudible), [MUSIC], [LAUGHTER]
+- **Auto-corrections** : "je veux dire... plutot..." → garde juste la reformulation
+
+## A identifier dans la transcription
+Avant de couper, scan la transcription pour :
+1. Listes tous les mots/silences a exclure (par timestamp)
+2. Recompose les segments en gardant uniquement les phrases CLEAN
+3. Verifie que les transitions son-a-son sont fluides (pas de coupe au milieu d'un mot)
+
+## Exemple concret
+Transcription : "Alors euh... alors le truc c'est que... je voulais vous dire que c'est genial"
+→ Segments a couper : "je voulais vous dire que c'est genial" (coupe toute la partie bruyante)
+→ Tu produis UNE phrase propre, pas une bouillie de "alors euh alors"
 
 # REGLES DE COUPE CRITIQUES
 
 - Debut segment : 0.1s AVANT le premier mot (pas au debut pile)
 - Fin segment : 0.5-0.6s APRES le dernier mot (sinon le son est coupe)
-- Fin avant silence/text frame : 0.7-1.0s minimum
-- Entre segments : max 0.2-0.3s de silence
-- CHAQUE segment doit commencer ET finir sur une phrase complete (. ! ? ou pause > 0.5s)
+- Entre segments : max 0.15s de silence apres nettoyage (plus serre qu'avant)
+- CHAQUE segment doit commencer ET finir sur une phrase complete (. ! ? ou pause intentionnelle)
 - NE JAMAIS couper au milieu d'un mot
 - Duree totale : respect strict de la cible (+/- 3s max)
 - Toujours utiliser concat FILTER (-filter_complex), JAMAIS -f concat (demuxer)
+- PRIORITE ABSOLUE au nettoyage : mieux vaut un reel de 25s parfait qu'un reel de 30s avec un "euh"
 
 # DESCRIPTION INSTAGRAM (pour le champ description de outputs.json)
 
@@ -276,14 +334,21 @@ function buildVideoPrompt(params, { videoPaths, workDir, outputDir, outputsJsonP
   const fontSize = styleConfig.size || 80;
   const wpl = styleConfig.wordsPerLine || 5;
 
-  return `# TACHE : MONTAGE VIDEO
+  return `# TACHE : MONTAGE VIDEO (RAW — SANS SOUS-TITRES)
 
 ## Parametres
 - Mode : ${params.videoType || "teaser"}
 ${durationTarget ? `- Duree cible : ${durationTarget}s MAXIMUM (strict +/- 3s)` : ""}
 - Format : ${params.format || "9:16"}${params.format === "9:16" ? " (vertical Reels — utiliser crop 9:16)" : ""}
-- Style sous-titres : ${styleName} (accent: ${accent}, taille: ${fontSize}px, mots/ligne: ${wpl})
+- Style sous-titres (HINT pour l'editeur, PAS a brûler maintenant) : ${styleName} (accent: ${accent})
 - Langue : ${params.language || "fr"}
+
+## IMPORTANT : SORTIE SANS SOUS-TITRES
+Ne lance PAS burn_subtitles.py. L'utilisateur editera les sous-titres dans une interface dediee.
+Tu dois produire :
+1. Une video coupee NETTOYEE (sans "euh", silences, faux-departs) — sans sous-titres burnes
+2. Sa transcription JSON (issue de la re-transcription de la video coupee)
+3. outputs.json avec \`subtitlesBurned: false\` et \`transcription: "<fichier>.json"\`
 
 ## Fichiers
 - Videos source :
@@ -296,18 +361,22 @@ ${videoList}
 ${params.prompt}
 
 ## CRITERES DE SUCCES
-- [ ] Au moins 1 fichier .mp4 dans ${outputDir}/
-- [ ] outputs.json existe et contient un tableau JSON non-vide
+- [ ] Au moins 1 fichier .mp4 dans ${outputDir}/ (video SANS sous-titres burnes)
+- [ ] Fichier .json transcription correspondant dans ${outputDir}/ pour chaque video
+- [ ] outputs.json avec pour chaque entree : \`file\`, \`label\`, \`description\`, \`transcription\`, \`subtitlesBurned: false\`
 - [ ] ${durationTarget ? `Duree du reel <= ${durationTarget + 3}s` : "Duree respecte le prompt"}
-- [ ] Sous-titres synchronises avec l'audio FINAL (re-transcription de la video coupee)
+- [ ] Nettoyage AGRESSIF effectif : aucune hesitation, aucun silence mort, aucun faux-depart
 - [ ] Description Instagram complete dans outputs.json
 
 ## DEMARRAGE
 1. Verifier les fichiers d'input avec \`ls "${path.dirname(videoPaths[0] || "")}"\`
 2. Commencer par ffprobe puis transcribe.py sur l'original
 3. Lire la transcription JSON avec Read AVANT de decider des coupes
-4. Suivre la sequence du pipeline (voir system prompt)
-5. Terminer par Write sur outputs.json`;
+4. **IDENTIFIER tous les "euh", silences, faux-departs a EXCLURE des segments**
+5. Couper la video (concat FILTER) — segments propres uniquement
+6. RE-TRANSCRIRE la video coupee → \`<output>/reel_<N>_transcription.json\`
+7. Copier video dans output/ — PAS de burn_subtitles
+8. Ecrire outputs.json (avec transcription path + subtitlesBurned: false)`;
 }
 
 function buildMiniaturePrompt(params, { videoPaths, workDir, outputDir, outputsJsonPath, referenceFile, inputDir }) {
