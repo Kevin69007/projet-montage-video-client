@@ -50,6 +50,12 @@ function OutputCard({
   const url = getDownloadUrl(jobId, output.file);
   const isVideo = /\.(mp4|mov|webm)$/i.test(output.file);
   const isImage = /\.(jpg|jpeg|png|webp)$/i.test(output.file);
+  // Editor is available for video outputs that haven't had subtitles burned yet
+  // AND have a transcription file alongside them
+  const editorAvailable = isVideo && !output.subtitlesBurned && !!output.transcription;
+  const editorUrl = editorAvailable
+    ? `/job/${jobId}/editor/${encodeURIComponent(output.file)}`
+    : null;
 
   const copyDescription = () => {
     navigator.clipboard.writeText(output.description);
@@ -69,13 +75,23 @@ function OutputCard({
             {output.label}
           </span>
         </div>
-        <a
-          href={url}
-          download={output.file}
-          className="btn-ghost text-xs py-1.5 px-3"
-        >
-          Telecharger
-        </a>
+        <div className="flex gap-2">
+          {editorUrl && (
+            <a
+              href={editorUrl}
+              className="btn-primary text-xs py-1.5 px-3"
+            >
+              Editer
+            </a>
+          )}
+          <a
+            href={url}
+            download={output.file}
+            className="btn-ghost text-xs py-1.5 px-3"
+          >
+            Telecharger
+          </a>
+        </div>
       </div>
 
       {/* Video player */}

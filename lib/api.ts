@@ -1,3 +1,5 @@
+import type { EditorData } from "./editor/types";
+
 const API_BASE = "";
 
 export async function uploadFiles(
@@ -112,4 +114,13 @@ export async function getJobStatus(jobId: string): Promise<JobStatus> {
 
 export function getDownloadUrl(jobId: string, fileName: string): string {
   return `${API_BASE}/api/download/${jobId}/${encodeURIComponent(fileName)}`;
+}
+
+export async function getEditorData(jobId: string, fileName: string): Promise<EditorData> {
+  const res = await fetch(`${API_BASE}/api/editor/${jobId}/${encodeURIComponent(fileName)}/data`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Failed to load editor data");
+  }
+  return res.json();
 }
