@@ -49,6 +49,16 @@ interface KimiOutput {
   changes?: KimiChanges;
 }
 
+type AspectRatioValue = NonNullable<NonNullable<KimiChanges["style"]>["aspectRatio"]>;
+const VALID_ASPECT_RATIOS: ReadonlySet<AspectRatioValue> = new Set([
+  "9:16", "16:9", "1:1", "4:5", "4:3", "original",
+]);
+function sanitizeAspectRatio(v: unknown): AspectRatioValue | undefined {
+  return typeof v === "string" && (VALID_ASPECT_RATIOS as ReadonlySet<string>).has(v)
+    ? (v as AspectRatioValue)
+    : undefined;
+}
+
 /** Apply Kimi's proposed changes to an EditorState, return new state. */
 function applyChanges(
   state: EditorState,
@@ -114,13 +124,22 @@ function applyChanges(
       ...(changes.style.posY !== undefined ? { posY: changes.style.posY } : {}),
       ...(changes.style.wpl !== undefined ? { wpl: changes.style.wpl } : {}),
       ...(changes.style.lines !== undefined ? { lines: changes.style.lines } : {}),
-      ...(changes.style.aspectRatio !== undefined ? { aspectRatio: changes.style.aspectRatio } : {}),
+      ...(sanitizeAspectRatio(changes.style.aspectRatio) !== undefined
+        ? { aspectRatio: sanitizeAspectRatio(changes.style.aspectRatio) }
+        : {}),
     };
-    if (changes.style.name && changes.style.name !== next.style.name) {
+    // Only accept name change when it maps to a real style — otherwise we'd
+    // end up with name/config mismatch (burner script picked by name, config
+    // still the old one).
+    if (
+      changes.style.name &&
+      changes.style.name !== next.style.name &&
+      styles[changes.style.name]
+    ) {
       next.style = {
         ...next.style,
         name: changes.style.name,
-        config: styles[changes.style.name] || next.style.config,
+        config: styles[changes.style.name],
       };
     }
   }

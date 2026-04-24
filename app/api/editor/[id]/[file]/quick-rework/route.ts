@@ -46,6 +46,16 @@ interface KimiOutput {
   changes?: KimiChanges;
 }
 
+type AspectRatioValue = NonNullable<NonNullable<KimiChanges["style"]>["aspectRatio"]>;
+const VALID_ASPECT_RATIOS: ReadonlySet<AspectRatioValue> = new Set([
+  "9:16", "16:9", "1:1", "4:5", "4:3", "original",
+]);
+function sanitizeAspectRatio(v: unknown): AspectRatioValue | undefined {
+  return typeof v === "string" && (VALID_ASPECT_RATIOS as ReadonlySet<string>).has(v)
+    ? (v as AspectRatioValue)
+    : undefined;
+}
+
 function findFfmpeg(): string {
   const candidates = [
     process.env.FFMPEG_PATH,
@@ -72,7 +82,11 @@ function extractJson(text: string): KimiOutput | null {
   }
 }
 
-function applyChanges(state: EditorState, changes: KimiChanges): EditorState {
+function applyChanges(
+  state: EditorState,
+  changes: KimiChanges,
+  styles: Record<string, SubtitleStyle> = {}
+): EditorState {
   const next: EditorState = {
     ...state,
     transcription: state.transcription.map((e) => ({ ...e })),
@@ -128,11 +142,23 @@ function applyChanges(state: EditorState, changes: KimiChanges): EditorState {
       ...(changes.style.posY !== undefined ? { posY: changes.style.posY } : {}),
       ...(changes.style.wpl !== undefined ? { wpl: changes.style.wpl } : {}),
       ...(changes.style.lines !== undefined ? { lines: changes.style.lines } : {}),
-      ...(changes.style.aspectRatio !== undefined ? { aspectRatio: changes.style.aspectRatio } : {}),
+      ...(sanitizeAspectRatio(changes.style.aspectRatio) !== undefined
+        ? { aspectRatio: sanitizeAspectRatio(changes.style.aspectRatio) }
+        : {}),
     };
-    if (changes.style.name && changes.style.name !== next.style.name) {
-      // Name change is honored only as a hint — config is rebuilt elsewhere.
-      next.style = { ...next.style, name: changes.style.name };
+    // Only accept name change when it maps to a real style — otherwise we'd
+    // end up with name/config mismatch (burner script picked by name, config
+    // still the old one).
+    if (
+      changes.style.name &&
+      changes.style.name !== next.style.name &&
+      styles[changes.style.name]
+    ) {
+      next.style = {
+        ...next.style,
+        name: changes.style.name,
+        config: styles[changes.style.name],
+      };
     }
   }
 
@@ -332,12 +358,7 @@ export async function POST(
       );
     }
 
-    const nextState = applyChanges(state, parsed.changes!);
-
-    // Resolve style.config from name when name is a known style
-    if (nextState.style.name && styles[nextState.style.name]) {
-      nextState.style = { ...nextState.style, config: styles[nextState.style.name] };
-    }
+    const nextState = applyChanges(state, parsed.changes!, styles);
 
     // Persist updated state under the RAW filename so future reworks compose on it
     const editsDir = path.join(jobDir, "edits");
