@@ -453,6 +453,7 @@ async function main() {
     scriptsDir: SCRIPTS_DIR,
     fontsDir: FONTS_DIR,
     pipelineDir: PIPELINE_DIR,
+    mode: params.mode || "video",
   });
   const userPromptText = buildUserPrompt(params, {
     videoPaths,

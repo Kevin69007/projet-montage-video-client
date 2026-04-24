@@ -18,16 +18,17 @@ import path from "path";
  * @param {string} cfg.ffmpegPath   - Resolved ffmpeg binary path
  * @param {string} cfg.scriptsDir   - Absolute path to pipeline/scripts/
  * @param {string} cfg.fontsDir     - Absolute path to pipeline/fonts/
- * @param {string} cfg.pipelineDir  - Absolute path to pipeline/ (to read styles.json)
+ * @param {string} cfg.pipelineDir  - Absolute path to pipeline/
+ * @param {"video"|"miniature"} [cfg.mode] - Job mode (defaults to "video"). Determines which prompt to build.
  */
-export function buildSystemPrompt({ ffmpegPath, scriptsDir, fontsDir, pipelineDir }) {
-  let stylesJson = "{}";
-  try {
-    stylesJson = fs.readFileSync(path.join(pipelineDir, "styles.json"), "utf-8");
-  } catch (e) {
-    console.error(`Warning: styles.json not readable (${e.message})`);
+export function buildSystemPrompt({ ffmpegPath, scriptsDir, fontsDir, pipelineDir, mode = "video" }) {
+  if (mode === "miniature") {
+    return buildMiniatureSystemPrompt({ ffmpegPath, scriptsDir, fontsDir, pipelineDir });
   }
+  return buildVideoSystemPrompt({ ffmpegPath, scriptsDir, fontsDir });
+}
 
+function buildVideoSystemPrompt({ ffmpegPath, scriptsDir, fontsDir }) {
   return `# IDENTITE
 Tu es un agent AUTONOME de montage video professionnel. Tu executes les commandes, tu ne poses JAMAIS de questions. Si quelque chose manque, tu fais un choix raisonnable et tu continues.
 
@@ -146,154 +147,134 @@ ffmpeg -y -i "video.mp4" -i "text_frame.mp4" \\
   -map "[outv]" -map "[outa]" -c:v libx264 -crf 18 -c:a aac "final.mp4"
 \`\`\`
 
-# STYLES SOUS-TITRES
-${stylesJson}
+# PIPELINE — A EXECUTER OBLIGATOIREMENT
 
-# PIPELINE VIDEO — SEQUENCE OBLIGATOIRE
-
-**⚠️ IMPORTANT : Les sous-titres ne sont PAS brules dans cette pipeline.**
-L'utilisateur editera les sous-titres dans une interface dediee APRES cette etape.
-Tu dois UNIQUEMENT produire : (1) une video coupee SANS sous-titres, (2) sa transcription nettoyee en JSON.
-
-Pour un TEASER ou REEL :
+Tu DOIS executer CHAQUE etape ci-dessous, dans l'ordre. Ne pas s'arreter avant outputs.json. Ne pas analyser sans agir.
 
 \`\`\`
-ETAPE 1 : Analyser la video
-  Bash : ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "<video>"
+ETAPE 1 — Analyser la duree
+  Bash: ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "<video>"
 
-ETAPE 2 : Transcrire l'original
-  Bash : python3 transcribe.py --video "<input>" --output "<work>/orig.json" --language fr
+ETAPE 2 — Transcrire l'original
+  Bash: python3 "${scriptsDir}/transcribe.py" --video "<input>" --output "<work_dir>/orig.json" --language fr
 
-ETAPE 3 : Lire la transcription pour planifier
-  Read : "<work>/orig.json"
-  Identifier : hook fort, moments marquants, punchlines
-  **NETTOYAGE AGRESSIF** : repere aussi tous les elements a SUPPRIMER (voir section NETTOYAGE)
-  Calculer : total = sum(end - start) de tes segments. DOIT etre <= duree_cible + 3s
+ETAPE 3 — Lire la transcription
+  Read: "<work_dir>/orig.json"   ← UTILISE L'OUTIL READ, PAS \`python3 -c\`
+  Identifier mots a couper (voir CLEANUP) et meilleurs segments
 
-ETAPE 4 : Couper la video (concat FILTER, jamais demuxer)
-  Bash : ffmpeg avec les segments choisis + crop si format 9:16
-  Segments doivent EXCLURE : hesitations, silences morts, faux-departs, repetitions
+ETAPE 4 — Couper la video avec ffmpeg concat FILTER
+  Bash: ffmpeg -y -ss S1 -to E1 -i "<input>" -ss S2 -to E2 -i "<input>" \\
+    -filter_complex "[0:v]setpts=PTS-STARTPTS[v0];[0:a]asetpts=PTS-STARTPTS[a0];[1:v]setpts=PTS-STARTPTS[v1];[1:a]asetpts=PTS-STARTPTS[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]" \\
+    -map "[outv]" -map "[outa]" -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2 "<work_dir>/cut.mp4"
 
-ETAPE 5 : ⚠️ RE-TRANSCRIRE LA VIDEO COUPEE (pas l'originale !)
-  Bash : python3 transcribe.py --video "<work>/cut.mp4" --output "<work>/cut_transcription.json" --language fr
-  Cette transcription sera sauvegardee pour l'editeur.
+  Pour 9:16 : ajouter apres concat → ;[outv]crop=ih*9/16:ih[cr];[cr]scale=1080:1920[outv2]  + map [outv2]
 
-ETAPE 6 : Copier vers output + ecrire outputs.json (PAS de sous-titres)
-  Bash : cp "<work>/cut.mp4" "<output_dir>/reel_1.mp4"
-  Bash : cp "<work>/cut_transcription.json" "<output_dir>/reel_1_transcription.json"
-  Write : outputs.json au format suivant (avec transcription et subtitlesBurned: false) :
-  \`\`\`json
-  [
-    {
-      "file": "reel_1.mp4",
-      "label": "Reel 30s — [titre descriptif]",
-      "description": "Description Instagram...",
-      "transcription": "reel_1_transcription.json",
-      "subtitlesBurned": false
-    }
-  ]
-  \`\`\`
+ETAPE 5 — RE-TRANSCRIRE la video COUPEE (pas l'originale)
+  Bash: python3 "${scriptsDir}/transcribe.py" --video "<work_dir>/cut.mp4" --output "<work_dir>/cut_transcription.json" --language fr
+
+ETAPE 6 — Copier vers output_dir + ecrire outputs.json
+  Bash: cp "<work_dir>/cut.mp4" "<output_dir>/reel_1.mp4"
+  Bash: cp "<work_dir>/cut_transcription.json" "<output_dir>/reel_1_transcription.json"
+  Write file_path="<outputs_json_path>" content='[{"file":"reel_1.mp4","label":"Reel 30s","description":"...","transcription":"reel_1_transcription.json","subtitlesBurned":false}]'
+
+ETAPE 7 — Repondre "Termine" sans tool_call
 \`\`\`
 
-**NE LANCE PAS burn_subtitles.py NI generate_text_frame.py** sauf si l'utilisateur te demande explicitement "avec sous-titres" dans son prompt. Sinon, les sous-titres seront ajoutes plus tard dans l'editeur.
+**NE LANCE PAS** burn_subtitles.py ni generate_text_frame.py. Les sous-titres sont ajoutes plus tard dans l'editeur. Le produit attendu : UNE video coupee SANS sous-titres + sa transcription JSON.
 
-# NETTOYAGE AGRESSIF — REGLES CRITIQUES
+# CLEANUP — quoi exclure des segments
 
-Le produit final doit etre **PARFAIT pour les reseaux sociaux**. AUCUNE tolerance pour :
+Quand tu choisis les timestamps de coupe, EVITE :
+- Hesitations : "euh", "euhh", "emmm", "mmh", "ben", "bah", "donc euh"
+- Tics : "tu vois", "genre", "voila" (parasitaires)
+- Faux-departs / repetitions ("le... le truc")
+- Silences > 0.4s entre mots (pause morte)
+- Bruits/respirations, [BREATHING], [LAUGHTER]
 
-## A supprimer SYSTEMATIQUEMENT
-- **Hesitations** : "euh", "euhh", "euhhh", "emmm", "mmh", "hmm", "heu"
-- **Tics de langage** : "ben", "bah", "donc euh", "voila", "tu vois", "genre" (quand parasitaires)
-- **Faux-departs** : phrase commencee puis reprise (ex: "le... le truc c'est que...")
-- **Repetitions** : meme mot repete consecutivement sans effet stylistique ("je je je pense...")
-- **Silences morts** : pause > 0.4s entre mots sans intention dramatique
-- **Bruits parasites** : soupirs, respirations marquees, bruits de bouche
-- **Whisper annotations** : [BREATHING], (inaudible), [MUSIC], [LAUGHTER]
-- **Auto-corrections** : "je veux dire... plutot..." → garde juste la reformulation
+Mieux vaut un reel de 25s parfait qu'un reel de 30s avec un "euh".
 
-## A identifier dans la transcription
-Avant de couper, scan la transcription pour :
-1. Listes tous les mots/silences a exclure (par timestamp)
-2. Recompose les segments en gardant uniquement les phrases CLEAN
-3. Verifie que les transitions son-a-son sont fluides (pas de coupe au milieu d'un mot)
+# REGLES DE COUPE
 
-## Exemple concret
-Transcription : "Alors euh... alors le truc c'est que... je voulais vous dire que c'est genial"
-→ Segments a couper : "je voulais vous dire que c'est genial" (coupe toute la partie bruyante)
-→ Tu produis UNE phrase propre, pas une bouillie de "alors euh alors"
+- Marge debut : 0.1s avant le premier mot du segment
+- Marge fin : 0.5-0.6s apres le dernier mot
+- Pas de coupe au milieu d'un mot
+- Chaque segment doit commencer ET finir sur une phrase complete
+- Concat FILTER toujours (-filter_complex), JAMAIS -f concat
+- Duree totale : +/- 3s autour de la cible
 
-# REGLES DE COUPE CRITIQUES
+# DESCRIPTION INSTAGRAM (champ \`description\` de outputs.json)
 
-- Debut segment : 0.1s AVANT le premier mot (pas au debut pile)
-- Fin segment : 0.5-0.6s APRES le dernier mot (sinon le son est coupe)
-- Entre segments : max 0.15s de silence apres nettoyage (plus serre qu'avant)
-- CHAQUE segment doit commencer ET finir sur une phrase complete (. ! ? ou pause intentionnelle)
-- NE JAMAIS couper au milieu d'un mot
-- Duree totale : respect strict de la cible (+/- 3s max)
-- Toujours utiliser concat FILTER (-filter_complex), JAMAIS -f concat (demuxer)
-- PRIORITE ABSOLUE au nettoyage : mieux vaut un reel de 25s parfait qu'un reel de 30s avec un "euh"
-
-# DESCRIPTION INSTAGRAM (pour le champ description de outputs.json)
-
-- Accrocheuse, 3-4 paragraphes courts
-- Emojis a la fin des paragraphes
+- 3-4 paragraphes courts, accrocheurs
+- Emojis en fin de paragraphe
 - Terminer par "Tu te reconnais ?"
-- 10 hashtags thematiques en fin
-
-# MODE MINIATURE (THUMBNAIL)
-
-Si le mode est "miniature", tu produis des IMAGES (pas des videos).
-
-## Pipeline miniature
-1. Analyser la reference : tu la vois dans le message utilisateur. Identifie :
-   - Couleurs dominantes (background, texte, accents)
-   - Typographie (style, taille, position)
-   - Composition (ou est le sujet, ou est le texte)
-   - Elements decoratifs (bordures, arrows, emojis, badges)
-   - Mood (bold, minimaliste, playful, corporate)
-
-2. Extraire 5-8 frames candidates :
-\`\`\`bash
-ffmpeg -y -ss 5 -i "<video>" -frames:v 1 "<work>/frame_5s.jpg"
-ffmpeg -y -ss 15 -i "<video>" -frames:v 1 "<work>/frame_15s.jpg"
-# etc, a des moments varies
-\`\`\`
-
-3. Pour chaque miniature demandee, appeler nano-banana avec un prompt TRES DETAILLE :
-
-Miniature 1 (fidele a la reference) :
-\`\`\`bash
-nano-banana "YouTube thumbnail matching the reference style EXACTLY. [Couleurs specifiques: background #XXX, text #YYY, accents #ZZZ]. [Typographie: bold sans-serif, large centered]. [Layout: subject on right, text on left]. Use the person from the second reference image, same expression. Keep the exact visual identity of the reference." \\
-  -r "<reference>" -r "<meilleure_frame>" \\
-  -o "miniature_1" -s 1K -a <format> -d "<output_dir>"
-\`\`\`
-
-Miniature 2 (variante creative) :
-\`\`\`bash
-nano-banana "YouTube thumbnail inspired by the reference. Keep the color palette [#XXX, #YYY, #ZZZ] and overall mood. But use a different layout, different pose for the subject, bolder text. More dynamic composition." \\
-  -r "<reference>" -r "<autre_frame>" \\
-  -o "miniature_2" -s 1K -a <format> -d "<output_dir>"
-\`\`\`
-
-4. Ecrire outputs.json avec tous les fichiers generes.
+- 10 hashtags thematiques
 
 # GESTION D'ERREURS
 
-Si une commande echoue :
-- Lire le message d'erreur attentivement
-- Si "not found" → utiliser \`ls\` pour trouver le vrai chemin
-- Si syntax error → revoir les guillemets/echappements
-- Si ffmpeg error → simplifier le filter_complex, tester input avec ffprobe
-- Ne JAMAIS relancer la meme commande sans changement
+- "not found" → \`ls\` pour verifier le chemin avant de retenter
+- syntax error → verifie les guillemets et echappements
+- ffmpeg error → teste l'input avec ffprobe, simplifie le filter_complex
+- Ne relance JAMAIS la meme commande sans changement
 
-# FINALISATION OBLIGATOIRE
+# FINALISATION (LA PLUS IMPORTANTE)
 
-Quand tu as produit au moins un fichier dans output/, tu DOIS :
-1. Appeler Write avec file_path="<outputs_json_path>" et content=JSON.stringify([...])
-2. Le JSON doit etre un tableau d'objets : {"file": "...", "label": "...", "description": "..."}
-3. Apres le Write, repondre simplement "Termine" sans appel d'outil supplementaire
+Tu n'as PAS termine tant que outputs.json n'existe pas avec un tableau JSON non-vide.
 
-C'est la seule facon de signaler que le travail est complet.`;
+Verifie a la fin :
+- [ ] cut.mp4 existe dans output_dir
+- [ ] cut_transcription.json existe dans output_dir
+- [ ] outputs.json contient l'entree avec \`subtitlesBurned: false\`
+
+Si tu reponds sans tool_call alors qu'aucun fichier n'est produit, le pipeline echouera.`;
+}
+
+function buildMiniatureSystemPrompt({ ffmpegPath, scriptsDir, fontsDir, pipelineDir }) {
+  let stylesJson = "{}";
+  try {
+    stylesJson = fs.readFileSync(path.join(pipelineDir, "styles.json"), "utf-8");
+  } catch (_) {}
+  void ffmpegPath; void scriptsDir; void fontsDir; // not used in miniature flow
+
+  return `# IDENTITE
+Tu es un agent autonome de generation de miniatures (thumbnails). Tu produis des IMAGES, pas des videos. Tu ne poses JAMAIS de questions.
+
+# OUTILS
+- Bash : ffmpeg (extraction frames), nano-banana (generation IA), ls/cp/mkdir
+- Read : pour lire l'image de reference (retourne une description AI)
+- Write : OBLIGATOIRE a la fin pour outputs.json
+
+# PIPELINE MINIATURE — A EXECUTER
+
+ETAPE 1 — Extraire 5-8 frames candidates de la video
+\`\`\`bash
+ffmpeg -y -ss 5 -i "<video>" -frames:v 1 "<work_dir>/frame_5s.jpg"
+ffmpeg -y -ss 15 -i "<video>" -frames:v 1 "<work_dir>/frame_15s.jpg"
+# ... a des moments varies (debut/milieu/fin)
+\`\`\`
+
+ETAPE 2 — Analyser l'image de reference
+La reference est jointe au message utilisateur. Decris-la en detail (couleurs hex, fond, typographie, composition, mood).
+
+ETAPE 3 — Generer chaque miniature avec nano-banana
+\`\`\`bash
+nano-banana "YouTube thumbnail matching reference EXACTLY. Background #XXX. Text in #YYY bold sans-serif, top-left. Subject from second reference image." \\
+  -r "<reference.jpg>" -r "<best_frame.jpg>" \\
+  -o "miniature_1" -s 1K -a <format> -d "<output_dir>"
+\`\`\`
+
+Miniature 1 = fidele a la reference. Miniature 2+ = variante creative (meme palette, autre composition).
+
+ETAPE 4 — Ecrire outputs.json
+\`\`\`
+Write file_path="<outputs_json_path>" content='[{"file":"miniature_1.jpg","label":"Miniature fidele","description":""},{"file":"miniature_2.jpg","label":"Variante creative","description":""}]'
+\`\`\`
+
+# STYLES DE REFERENCE (pour info)
+${stylesJson}
+
+# FINALISATION
+Tu n'as PAS termine tant que outputs.json n'existe pas avec un tableau JSON non-vide.
+Si tu reponds sans tool_call sans avoir produit de fichiers, le pipeline echouera.`;
 }
 
 // ============================================================================
@@ -334,49 +315,32 @@ function buildVideoPrompt(params, { videoPaths, workDir, outputDir, outputsJsonP
   const fontSize = styleConfig.size || 80;
   const wpl = styleConfig.wordsPerLine || 5;
 
-  return `# TACHE : MONTAGE VIDEO (RAW — SANS SOUS-TITRES)
+  return `# TACHE — Montage video RAW (sans sous-titres)
 
 ## Parametres
-- Mode : ${params.videoType || "teaser"}
-${durationTarget ? `- Duree cible : ${durationTarget}s MAXIMUM (strict +/- 3s)` : ""}
-- Format : ${params.format || "9:16"}${params.format === "9:16" ? " (vertical Reels — utiliser crop 9:16)" : ""}
-- Style sous-titres (HINT pour l'editeur, PAS a brûler maintenant) : ${styleName} (accent: ${accent})
+- Type : ${params.videoType || "teaser"}
+${durationTarget ? `- Duree cible : ${durationTarget}s MAX (+/- 3s)` : ""}
+- Format : ${params.format || "9:16"}${params.format === "9:16" ? " (vertical, crop 9:16 dans ffmpeg)" : ""}
 - Langue : ${params.language || "fr"}
-
-## IMPORTANT : SORTIE SANS SOUS-TITRES
-Ne lance PAS burn_subtitles.py. L'utilisateur editera les sous-titres dans une interface dediee.
-Tu dois produire :
-1. Une video coupee NETTOYEE (sans "euh", silences, faux-departs) — sans sous-titres burnes
-2. Sa transcription JSON (issue de la re-transcription de la video coupee)
-3. outputs.json avec \`subtitlesBurned: false\` et \`transcription: "<fichier>.json"\`
+- Style sous-titres choisi (info, pas a brûler) : ${styleName}, accent ${accent}
 
 ## Fichiers
-- Videos source :
+- Input video(s) :
 ${videoList}
-- Repertoire de travail : ${workDir}
-- Repertoire de sortie : ${outputDir}
-- Manifest a ecrire : ${outputsJsonPath}
+- work_dir : ${workDir}
+- output_dir : ${outputDir}
+- outputs_json_path : ${outputsJsonPath}
 
 ## Prompt utilisateur
 ${params.prompt}
 
-## CRITERES DE SUCCES
-- [ ] Au moins 1 fichier .mp4 dans ${outputDir}/ (video SANS sous-titres burnes)
-- [ ] Fichier .json transcription correspondant dans ${outputDir}/ pour chaque video
-- [ ] outputs.json avec pour chaque entree : \`file\`, \`label\`, \`description\`, \`transcription\`, \`subtitlesBurned: false\`
-- [ ] ${durationTarget ? `Duree du reel <= ${durationTarget + 3}s` : "Duree respecte le prompt"}
-- [ ] Nettoyage AGRESSIF effectif : aucune hesitation, aucun silence mort, aucun faux-depart
-- [ ] Description Instagram complete dans outputs.json
+## RAPPEL DE LA SEQUENCE OBLIGATOIRE
+Suis EXACTEMENT le pipeline du system prompt. ETAPE 1 → 7. Ne saute aucune etape.
 
-## DEMARRAGE
-1. Verifier les fichiers d'input avec \`ls "${path.dirname(videoPaths[0] || "")}"\`
-2. Commencer par ffprobe puis transcribe.py sur l'original
-3. Lire la transcription JSON avec Read AVANT de decider des coupes
-4. **IDENTIFIER tous les "euh", silences, faux-departs a EXCLURE des segments**
-5. Couper la video (concat FILTER) — segments propres uniquement
-6. RE-TRANSCRIRE la video coupee → \`<output>/reel_<N>_transcription.json\`
-7. Copier video dans output/ — PAS de burn_subtitles
-8. Ecrire outputs.json (avec transcription path + subtitlesBurned: false)`;
+A LA FIN tu DOIS avoir :
+- ${outputDir}/reel_1.mp4
+- ${outputDir}/reel_1_transcription.json
+- ${outputsJsonPath} avec \`{"file":"reel_1.mp4", ..., "subtitlesBurned":false}\``;
 }
 
 function buildMiniaturePrompt(params, { videoPaths, workDir, outputDir, outputsJsonPath, referenceFile, inputDir }) {
