@@ -176,6 +176,35 @@ export async function renderEditor(
   return res.json();
 }
 
+export interface QuickReworkResult {
+  ok: boolean;
+  reply: string;
+  videoFile: string;
+  version: number;
+  duration: number;
+  sourceFile: string;
+}
+
+export async function quickReworkVideo(
+  jobId: string,
+  fileName: string,
+  userPrompt: string
+): Promise<QuickReworkResult> {
+  const res = await fetch(
+    `${API_BASE}/api/editor/${jobId}/${encodeURIComponent(fileName)}/quick-rework`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userPrompt }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Quick rework failed");
+  }
+  return res.json();
+}
+
 export async function chatEditor(
   jobId: string,
   fileName: string,

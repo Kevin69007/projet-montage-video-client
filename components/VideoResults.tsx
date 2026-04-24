@@ -1,7 +1,8 @@
 "use client";
 
-import { getDownloadUrl, type JobOutput } from "@/lib/api";
+import { getDownloadUrl, quickReworkVideo, type JobOutput } from "@/lib/api";
 import { useState } from "react";
+import LoadingPulse from "@/components/LoadingPulse";
 
 interface VideoResultsProps {
   jobId: string;
@@ -30,14 +31,14 @@ export default function VideoResults({
       {hasEditable && (
         <div className="glass-card p-4 border-purple/30 bg-purple/5">
           <p className="text-sm text-text-body">
-            <strong className="text-purple-light">Etape suivante</strong> — clique sur <strong>Editer</strong> pour ajuster les sous-titres, couper la video, ajouter des marqueurs, ou demander a Kimi de retravailler la sequence.
+            <strong className="text-purple-light">Astuce</strong> — chaque video a son propre champ <strong>Ameliorer avec Kimi</strong> en bas. Decris ton changement (plus court, format 1:1, sous-titres plus gros...) et une nouvelle version apparait. Pour un controle precis, ouvre l&apos;<strong>Editeur</strong>.
           </p>
         </div>
       )}
 
       {/* Output videos */}
       {outputs.map((output, i) => (
-        <OutputCard key={i} jobId={jobId} output={output} index={i} />
+        <OutputCard key={`${output.file}-${i}`} jobId={jobId} output={output} index={i} />
       ))}
 
       {outputs.length === 0 && (
@@ -57,12 +58,21 @@ function OutputCard({
   index: number;
 }) {
   const [copied, setCopied] = useState(false);
+  const [prompt, setPrompt] = useState("");
+  const [pending, setPending] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "thinking" | "rendering">("idle");
+  const [error, setError] = useState("");
+  const [reply, setReply] = useState("");
+  const [done, setDone] = useState<{ file: string; version: number } | null>(null);
+
   const url = getDownloadUrl(jobId, output.file);
   const isVideo = /\.(mp4|mov|webm)$/i.test(output.file);
   const isImage = /\.(jpg|jpeg|png|webp)$/i.test(output.file);
-  // Editor is available for video outputs that haven't had subtitles burned yet
-  // AND have a transcription file alongside them
+  // Editer button: only on non-burned videos (the full editor expects a clean source).
   const editorAvailable = isVideo && !output.subtitlesBurned && !!output.transcription;
+  // Inline rework: any video with a transcription. The endpoint resolves the
+  // raw source via sourceFile lookup, so even burned versions can be reworked.
+  const reworkAvailable = isVideo && !!output.transcription;
   const editorUrl = editorAvailable
     ? `/job/${jobId}/editor/${encodeURIComponent(output.file)}`
     : null;
@@ -71,6 +81,30 @@ function OutputCard({
     navigator.clipboard.writeText(output.description);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const submitRework = async () => {
+    const trimmed = prompt.trim();
+    if (!trimmed || pending) return;
+    setPending(true);
+    setError("");
+    setReply("");
+    setDone(null);
+    setPhase("thinking");
+    try {
+      // Phase shift after ~6s — Kimi-thinking → render is the longer phase.
+      const phaseTimer = setTimeout(() => setPhase("rendering"), 6000);
+      const result = await quickReworkVideo(jobId, output.file, trimmed);
+      clearTimeout(phaseTimer);
+      setReply(result.reply);
+      setDone({ file: result.videoFile, version: result.version });
+      setPrompt("");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Erreur inconnue");
+    } finally {
+      setPending(false);
+      setPhase("idle");
+    }
   };
 
   return (
@@ -89,7 +123,7 @@ function OutputCard({
           {editorUrl && (
             <a
               href={editorUrl}
-              className="btn-primary text-xs py-1.5 px-3"
+              className="btn-ghost text-xs py-1.5 px-3"
             >
               Editer
             </a>
@@ -97,7 +131,7 @@ function OutputCard({
           <a
             href={url}
             download={output.file}
-            className="btn-ghost text-xs py-1.5 px-3"
+            className="btn-primary text-xs py-1.5 px-3"
           >
             Telecharger
           </a>
@@ -142,6 +176,81 @@ function OutputCard({
           <pre className="text-xs text-text-body whitespace-pre-wrap font-sans leading-relaxed">
             {output.description}
           </pre>
+        </div>
+      )}
+
+      {/* Inline rework prompt */}
+      {reworkAvailable && (
+        <div className="p-4 border-t border-glass-border bg-purple/5">
+          <div className="flex items-center justify-between mb-3">
+            <span className="mono-label">Ameliorer avec Kimi</span>
+            <span className="mono-label text-purple-light/60">~30-60s</span>
+          </div>
+
+          {pending ? (
+            <div className="space-y-3">
+              <LoadingPulse
+                label={
+                  phase === "rendering"
+                    ? "Rendu en cours — concat ffmpeg + sous-titres burned..."
+                    : "Kimi analyse ta demande et planifie les modifications..."
+                }
+              />
+            </div>
+          ) : (
+            <>
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    submitRework();
+                  }
+                }}
+                placeholder="Ex: fais le plus court, passe en 1:1, sous-titres plus gros, garde juste la punchline..."
+                rows={2}
+                className="glass-input text-sm resize-none"
+                disabled={pending}
+              />
+              <div className="flex items-center justify-between mt-2">
+                <span className="mono-label text-text-muted/60">Cmd/Ctrl + Entree</span>
+                <button
+                  onClick={submitRework}
+                  disabled={!prompt.trim() || pending}
+                  className="btn-primary text-xs py-1.5 px-4"
+                >
+                  Reformuler →
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* Kimi reply */}
+          {reply && !pending && (
+            <div className="mt-3 p-3 border border-purple/30 bg-purple/10">
+              <div className="mono-label text-purple-light mb-1">Reponse Kimi</div>
+              <p className="text-xs text-text-body leading-relaxed">{reply}</p>
+            </div>
+          )}
+
+          {/* Success notice */}
+          {done && !pending && (
+            <div className="mt-3 p-3 border border-orange/40 bg-orange/10">
+              <div className="mono-label text-orange-light mb-1">Nouvelle version produite</div>
+              <p className="text-xs text-text-body">
+                <strong>{done.file}</strong> — v{done.version}. Elle apparait ci-dessous des que la liste se rafraichit.
+              </p>
+            </div>
+          )}
+
+          {/* Error */}
+          {error && !pending && (
+            <div className="mt-3 p-3 border border-red-500/40 bg-red-500/10">
+              <div className="mono-label text-red-400 mb-1">Erreur</div>
+              <p className="text-xs text-text-body">{error}</p>
+            </div>
+          )}
         </div>
       )}
     </div>

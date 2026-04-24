@@ -40,6 +40,7 @@ interface KimiChanges {
     posY?: number;
     wpl?: number;
     lines?: number;
+    aspectRatio?: "9:16" | "16:9" | "1:1" | "4:5" | "4:3" | "original";
   };
 }
 
@@ -109,6 +110,7 @@ function applyChanges(state: EditorState, changes: KimiChanges): EditorState {
       ...(changes.style.posY !== undefined ? { posY: changes.style.posY } : {}),
       ...(changes.style.wpl !== undefined ? { wpl: changes.style.wpl } : {}),
       ...(changes.style.lines !== undefined ? { lines: changes.style.lines } : {}),
+      ...(changes.style.aspectRatio !== undefined ? { aspectRatio: changes.style.aspectRatio } : {}),
     };
   }
 

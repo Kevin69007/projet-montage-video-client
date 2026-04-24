@@ -45,6 +45,9 @@ export interface SubtitleStyle {
   wordsPerLine?: number;
 }
 
+/** Aspect ratio override for re-cropping during render. */
+export type AspectRatio = "9:16" | "16:9" | "1:1" | "4:5" | "4:3" | "original";
+
 /** User-applied subtitle config (merges base style + overrides). */
 export interface AppliedSubtitleStyle {
   name: string | null;          // styles.json key (e.g. "hormozi")
@@ -54,6 +57,7 @@ export interface AppliedSubtitleStyle {
   sizeOverride: number | null;  // px override (null = use config.size)
   wpl: number;                  // words per line (override)
   lines: number;                // visible lines at once
+  aspectRatio?: AspectRatio;    // when set, render re-crops the video accordingly
 }
 
 /** Marker / comment placed on the timeline. */

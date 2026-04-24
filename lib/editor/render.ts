@@ -14,7 +14,7 @@
 import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
-import type { EditorState, TranscriptEntry, TranscriptWord, TranscriptSilence } from "./types";
+import type { AspectRatio, EditorState, TranscriptEntry, TranscriptWord, TranscriptSilence } from "./types";
 
 interface Segment {
   id: string;
@@ -77,6 +77,30 @@ function probeDuration(videoPath: string, ffmpegPath: string): number {
 }
 
 /**
+ * Aspect ratio crop+scale filter, or null when no transform needed.
+ *
+ * The crop is centered (default behavior of the `crop` filter when x/y are
+ * omitted). We compute the largest crop rectangle that fits the target ratio
+ * inside the source using `min()`, then scale to canonical dimensions.
+ *
+ * Commas inside `min()` are escaped (`\,`) so ffmpeg's filter parser doesn't
+ * treat them as filter-chain separators.
+ */
+function aspectRatioFilter(ar?: AspectRatio): string | null {
+  if (!ar || ar === "original") return null;
+  const targets: Record<string, { tw: number; th: number; w: number; h: number }> = {
+    "9:16": { tw: 9, th: 16, w: 1080, h: 1920 },
+    "16:9": { tw: 16, th: 9, w: 1920, h: 1080 },
+    "1:1":  { tw: 1, th: 1, w: 1080, h: 1080 },
+    "4:5":  { tw: 4, th: 5, w: 1080, h: 1350 },
+    "4:3":  { tw: 4, th: 3, w: 1440, h: 1080 },
+  };
+  const t = targets[ar];
+  if (!t) return null;
+  return `crop=min(iw\\,ih*${t.tw}/${t.th}):min(ih\\,iw*${t.th}/${t.tw}),scale=${t.w}:${t.h},setsar=1`;
+}
+
+/**
  * Apply cuts: produce a video keeping only non-deleted segments.
  * Uses concat filter (never demuxer). Returns output path.
  */
@@ -84,17 +108,21 @@ function applyCuts(
   inputVideo: string,
   keptSegments: Segment[],
   outputVideo: string,
-  ffmpegPath: string
+  ffmpegPath: string,
+  aspectRatio?: AspectRatio
 ): void {
   if (keptSegments.length === 0) {
     throw new Error("Aucun segment garde — impossible de produire une video.");
   }
 
+  const arVf = aspectRatioFilter(aspectRatio);
+
   // Single segment = simple trim (same encoding specs as multi-segment for consistency)
   if (keptSegments.length === 1) {
     const seg = keptSegments[0];
+    const vfArg = arVf ? `-vf "${arVf}"` : "";
     execSync(
-      `"${ffmpegPath}" -y -ss ${seg.start} -to ${seg.end} -i "${inputVideo}" -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2 "${outputVideo}"`,
+      `"${ffmpegPath}" -y -ss ${seg.start} -to ${seg.end} -i "${inputVideo}" ${vfArg} -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2 "${outputVideo}"`,
       { stdio: "pipe", maxBuffer: 50 * 1024 * 1024 }
     );
     return;
@@ -108,7 +136,9 @@ function applyCuts(
     .map((_, i) => `[${i}:v]setpts=PTS-STARTPTS[v${i}];[${i}:a]asetpts=PTS-STARTPTS[a${i}]`)
     .join(";");
   const concatInputs = keptSegments.map((_, i) => `[v${i}][a${i}]`).join("");
-  const filter = `${filterParts};${concatInputs}concat=n=${keptSegments.length}:v=1:a=1[outv][outa]`;
+  const filter = arVf
+    ? `${filterParts};${concatInputs}concat=n=${keptSegments.length}:v=1:a=1[concv][outa];[concv]${arVf}[outv]`
+    : `${filterParts};${concatInputs}concat=n=${keptSegments.length}:v=1:a=1[outv][outa]`;
 
   execSync(
     `"${ffmpegPath}" -y ${inputs} -filter_complex "${filter}" -map "[outv]" -map "[outa]" -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2 "${outputVideo}"`,
@@ -356,9 +386,9 @@ export async function renderEditorOutput(opts: RenderOptions): Promise<RenderRes
     throw new Error("Tous les segments sont supprimes — rien a rendre.");
   }
 
-  // Step 1: apply cuts
+  // Step 1: apply cuts (with optional aspect-ratio crop)
   const cutVideo = path.join(workDir, "cut.mp4");
-  applyCuts(sourceVideoPath, keptSegments, cutVideo, ffmpegPath);
+  applyCuts(sourceVideoPath, keptSegments, cutVideo, ffmpegPath, editorState.style?.aspectRatio);
 
   // Step 2: remap transcription
   const remapped = remapTranscription(editorState.transcription, keptSegments);
@@ -396,9 +426,12 @@ export async function renderEditorOutput(opts: RenderOptions): Promise<RenderRes
     // Step 5: update outputs.json (atomic, lock-protected — prevents lost updates from concurrent renders)
     const manifestPath = path.join(jobDir, "outputs.json");
 
-    // Snapshot current source entry for label/description (read once before lock)
+    // Snapshot current source entry for label/description + resolve raw source.
+    // sourceFile is conceptually the RAW file that all rework versions descend from.
+    // If the requested source is itself a derived version, look up its sourceFile.
     let sourceLabel = stem;
     let sourceDescription = "";
+    let rawSourceFile = sourceFile;
     if (fs.existsSync(manifestPath)) {
       try {
         const cur = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
@@ -407,6 +440,9 @@ export async function renderEditorOutput(opts: RenderOptions): Promise<RenderRes
           if (found) {
             sourceLabel = (typeof found.label === "string" ? found.label : stem);
             sourceDescription = (typeof found.description === "string" ? found.description : "");
+            if (typeof found.sourceFile === "string" && found.sourceFile.length > 0) {
+              rawSourceFile = found.sourceFile;
+            }
           }
         }
       } catch {}
@@ -414,10 +450,11 @@ export async function renderEditorOutput(opts: RenderOptions): Promise<RenderRes
 
     appendToManifest(manifestPath, {
       file: outName,
-      label: `${sourceLabel} — v${version}${shouldBurn ? "" : " (sans ST)"}`,
+      label: `${sourceLabel.replace(/\s*—\s*v\d+(?:\s*\(sans ST\))?$/, "")} — v${version}${shouldBurn ? "" : " (sans ST)"}`,
       description: sourceDescription,
       transcription: outTranscriptionName,
       subtitlesBurned: shouldBurn,
+      sourceFile: rawSourceFile,
     });
   } catch (err) {
     // Clean up reserved slot on error

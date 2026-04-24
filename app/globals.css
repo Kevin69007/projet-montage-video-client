@@ -203,6 +203,35 @@ body {
   box-shadow: 0 0 30px var(--purple-glow);
 }
 
+/* Loading pulse — branded loader for inline async work (purple→orange shimmer bars) */
+.loading-pulse {
+  display: flex;
+  gap: 4px;
+  height: 8px;
+  width: 100%;
+  align-items: center;
+  overflow: hidden;
+}
+
+.loading-pulse > span {
+  flex: 1;
+  height: 100%;
+  background: linear-gradient(90deg, var(--purple) 0%, var(--orange) 100%);
+  transform-origin: center;
+  opacity: 0.35;
+  animation: loading-pulse-bar 1.2s ease-in-out infinite;
+}
+
+.loading-pulse > span:nth-child(2) { animation-delay: 0.15s; }
+.loading-pulse > span:nth-child(3) { animation-delay: 0.30s; }
+.loading-pulse > span:nth-child(4) { animation-delay: 0.45s; }
+.loading-pulse > span:nth-child(5) { animation-delay: 0.60s; }
+
+@keyframes loading-pulse-bar {
+  0%, 100% { opacity: 0.25; transform: scaleY(0.5); }
+  50%      { opacity: 1;    transform: scaleY(1.4); box-shadow: 0 0 14px var(--purple-glow); }
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
