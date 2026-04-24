@@ -25,10 +25,18 @@ export async function GET(
       const outputs = JSON.parse(fs.readFileSync(outputsPath, "utf-8"));
       if (Array.isArray(outputs)) {
         const outputDir = path.join(jobDir, "output");
-        // Filter to outputs whose files actually exist on disk
+        // Filter to outputs whose files actually exist on disk AND have content.
+        // Skips zero-byte placeholders left by reserveNextVersion if a render
+        // was killed mid-flight before copyFileSync ran.
         status.outputs = outputs.filter((o: { file?: unknown }) => {
           if (typeof o?.file !== "string") return false;
-          return fs.existsSync(path.join(outputDir, o.file));
+          const p = path.join(outputDir, o.file);
+          if (!fs.existsSync(p)) return false;
+          try {
+            return fs.statSync(p).size > 0;
+          } catch {
+            return false;
+          }
         });
       }
     } catch (e) {

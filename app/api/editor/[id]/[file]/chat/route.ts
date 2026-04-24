@@ -5,7 +5,7 @@ import {
   buildEditorReworkSystem,
   buildEditorReworkUserMessage,
 } from "@/prompts.mjs";
-import type { EditorState } from "@/lib/editor/types";
+import type { EditorState, SubtitleStyle } from "@/lib/editor/types";
 import type { ChatMessage } from "@/lib/editor/chat-types";
 
 export const runtime = "nodejs";
@@ -50,7 +50,11 @@ interface KimiOutput {
 }
 
 /** Apply Kimi's proposed changes to an EditorState, return new state. */
-function applyChanges(state: EditorState, changes: KimiChanges): EditorState {
+function applyChanges(
+  state: EditorState,
+  changes: KimiChanges,
+  styles: Record<string, SubtitleStyle> = {}
+): EditorState {
   const next: EditorState = {
     ...state,
     transcription: state.transcription.map((e) => ({ ...e })),
@@ -101,7 +105,7 @@ function applyChanges(state: EditorState, changes: KimiChanges): EditorState {
     next.deletedSegments = Array.from(set);
   }
 
-  // Style
+  // Style — propagate name/config too so style swaps actually take effect when burning.
   if (changes.style) {
     next.style = {
       ...next.style,
@@ -112,6 +116,13 @@ function applyChanges(state: EditorState, changes: KimiChanges): EditorState {
       ...(changes.style.lines !== undefined ? { lines: changes.style.lines } : {}),
       ...(changes.style.aspectRatio !== undefined ? { aspectRatio: changes.style.aspectRatio } : {}),
     };
+    if (changes.style.name && changes.style.name !== next.style.name) {
+      next.style = {
+        ...next.style,
+        name: changes.style.name,
+        config: styles[changes.style.name] || next.style.config,
+      };
+    }
   }
 
   return next;
@@ -167,8 +178,10 @@ export async function POST(
 
     const cwd = /*turbopackIgnore: true*/ process.cwd();
     let stylesJson = "{}";
+    let stylesMap: Record<string, SubtitleStyle> = {};
     try {
       stylesJson = fs.readFileSync(path.join(cwd, "pipeline", "styles.json"), "utf-8");
+      stylesMap = JSON.parse(stylesJson);
     } catch {}
 
     const systemPrompt = buildEditorReworkSystem({ stylesJson });
@@ -222,7 +235,7 @@ export async function POST(
     const reply = typeof parsed.reply === "string" ? parsed.reply : "(pas de reponse)";
     let proposedState: EditorState | undefined;
     if (parsed.changes && Object.keys(parsed.changes).length > 0) {
-      proposedState = applyChanges(state, parsed.changes);
+      proposedState = applyChanges(state, parsed.changes, stylesMap);
     }
 
     const message: ChatMessage = {
