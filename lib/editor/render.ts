@@ -90,11 +90,11 @@ function applyCuts(
     throw new Error("Aucun segment garde — impossible de produire une video.");
   }
 
-  // Single segment = simple trim
+  // Single segment = simple trim (same encoding specs as multi-segment for consistency)
   if (keptSegments.length === 1) {
     const seg = keptSegments[0];
     execSync(
-      `"${ffmpegPath}" -y -ss ${seg.start} -to ${seg.end} -i "${inputVideo}" -c:v libx264 -crf 18 -c:a aac -ar 48000 -ac 2 "${outputVideo}"`,
+      `"${ffmpegPath}" -y -ss ${seg.start} -to ${seg.end} -i "${inputVideo}" -c:v libx264 -crf 18 -r 30000/1001 -c:a aac -ar 48000 -ac 2 "${outputVideo}"`,
       { stdio: "pipe", maxBuffer: 50 * 1024 * 1024 }
     );
     return;
@@ -206,21 +206,48 @@ function burnSubtitles(
 }
 
 /**
- * Find next available version number for a file stem.
- * E.g. if reel_1.mp4 and reel_1_v2.mp4 exist → returns 3.
+ * Find next available version number AND reserve it atomically by creating a
+ * zero-byte placeholder file. Prevents concurrent renders from picking the
+ * same version slot.
+ *
+ * Returns { version, reservedPath } — caller must overwrite reservedPath with
+ * the actual video OR remove it on error.
  */
-function nextVersion(outputDir: string, stem: string, ext: string): number {
-  const files = fs.readdirSync(outputDir);
-  const re = new RegExp(`^${stem}(?:_v(\\d+))?${ext.replace(".", "\\.")}$`);
-  let max = 1;
-  for (const f of files) {
-    const m = f.match(re);
-    if (m) {
-      const v = m[1] ? parseInt(m[1]) : 1;
-      if (v > max) max = v;
+function reserveNextVersion(
+  outputDir: string,
+  stem: string,
+  ext: string
+): { version: number; reservedPath: string; reservedName: string } {
+  const escapedExt = ext.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  const escapedStem = stem.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^${escapedStem}(?:_v(\\d+))?${escapedExt}$`);
+
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const files = fs.readdirSync(outputDir);
+    let max = 1;
+    for (const f of files) {
+      const m = f.match(re);
+      if (m) {
+        const v = m[1] ? parseInt(m[1]) : 1;
+        if (v > max) max = v;
+      }
+    }
+    const version = max + 1;
+    const reservedName = `${stem}_v${version}${ext}`;
+    const reservedPath = path.join(outputDir, reservedName);
+
+    // Atomic reservation: O_CREAT | O_EXCL semantics via writeFileSync with flag
+    try {
+      fs.writeFileSync(reservedPath, "", { flag: "wx" });
+      return { version, reservedPath, reservedName };
+    } catch (e) {
+      // File exists (another concurrent render beat us) — retry
+      const err = e as NodeJS.ErrnoException;
+      if (err.code !== "EEXIST") throw err;
+      // Loop again to find the next free slot
     }
   }
-  return max + 1;
+  throw new Error("Impossible de reserver un slot de version (trop de tentatives concurrentes)");
 }
 
 export interface RenderOptions {
@@ -288,40 +315,50 @@ export async function renderEditorOutput(opts: RenderOptions): Promise<RenderRes
     finalVideo = subtitledVideo;
   }
 
-  // Step 4: place in output dir with versioned name
+  // Step 4: reserve a versioned slot atomically (prevents concurrent renders from clobbering)
   const ext = path.extname(sourceFile);
   const stem = path.basename(sourceFile, ext).replace(/_v\d+$/, "");
-  const version = nextVersion(outputDir, stem, ext);
-  const outName = `${stem}_v${version}${ext}`;
+  const { version, reservedPath: outPath, reservedName: outName } = reserveNextVersion(outputDir, stem, ext);
   const outTranscriptionName = `${stem}_v${version}_transcription.json`;
-  const outPath = path.join(outputDir, outName);
   const outTranscriptionPath = path.join(outputDir, outTranscriptionName);
 
-  fs.copyFileSync(finalVideo, outPath);
-  fs.copyFileSync(cutTranscription, outTranscriptionPath);
+  try {
+    // Overwrite the placeholder with the real video
+    fs.copyFileSync(finalVideo, outPath);
+    fs.copyFileSync(cutTranscription, outTranscriptionPath);
 
-  // Step 5: update outputs.json with new entry
-  const manifestPath = path.join(jobDir, "outputs.json");
-  let manifest: Array<Record<string, unknown>> = [];
-  if (fs.existsSync(manifestPath)) {
-    try {
-      manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
-      if (!Array.isArray(manifest)) manifest = [];
-    } catch {
-      manifest = [];
+    // Step 5: update outputs.json with new entry (atomic write via temp file + rename)
+    const manifestPath = path.join(jobDir, "outputs.json");
+    let manifest: Array<Record<string, unknown>> = [];
+    if (fs.existsSync(manifestPath)) {
+      try {
+        manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+        if (!Array.isArray(manifest)) manifest = [];
+      } catch {
+        manifest = [];
+      }
     }
-  }
 
-  const sourceEntry = manifest.find((m) => m.file === sourceFile);
-  const newEntry = {
-    file: outName,
-    label: `${sourceEntry?.label || stem} — v${version}${shouldBurn ? "" : " (sans ST)"}`,
-    description: (sourceEntry?.description as string) || "",
-    transcription: outTranscriptionName,
-    subtitlesBurned: shouldBurn,
-  };
-  manifest.push(newEntry);
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    const sourceEntry = manifest.find((m) => m.file === sourceFile);
+    const newEntry = {
+      file: outName,
+      label: `${sourceEntry?.label || stem} — v${version}${shouldBurn ? "" : " (sans ST)"}`,
+      description: (sourceEntry?.description as string) || "",
+      transcription: outTranscriptionName,
+      subtitlesBurned: shouldBurn,
+    };
+    manifest.push(newEntry);
+
+    // Atomic write: write to temp file, then rename
+    const tmpPath = `${manifestPath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(manifest, null, 2));
+    fs.renameSync(tmpPath, manifestPath);
+  } catch (err) {
+    // Clean up reserved slot on error
+    try { fs.unlinkSync(outPath); } catch {}
+    try { fs.unlinkSync(outTranscriptionPath); } catch {}
+    throw err;
+  }
 
   // Cleanup work dir (keep on disk for debugging — comment out if needed)
   // fs.rmSync(workDir, { recursive: true, force: true });

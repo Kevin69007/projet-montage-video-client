@@ -15,6 +15,15 @@ const KIMI_API_URL = "https://api.moonshot.ai/v1/chat/completions";
 const KIMI_MODEL = process.env.KIMI_MODEL || "kimi-k2.6";
 const MAX_TOKENS = 6000;
 
+// Per-million-token pricing (USD), kept in sync with worker.mjs
+const PRICING: Record<string, { input: number; output: number }> = {
+  "kimi-k2.5": { input: 0.60, output: 2.50 },
+  "kimi-k2.6": { input: 0.95, output: 4.00 },
+  "kimi-k2-thinking": { input: 0.60, output: 2.50 },
+  "kimi-k2-turbo-preview": { input: 1.15, output: 8.00 },
+  "kimi-k2-thinking-turbo": { input: 1.15, output: 8.00 },
+};
+
 interface KimiChanges {
   deletedWordIds?: string[];
   restoredWordIds?: string[];
@@ -243,17 +252,22 @@ export async function POST(
       console.error("Failed to persist chat history:", e);
     }
 
-    return NextResponse.json({
-      message,
-      tokens: data.usage
-        ? {
-            input: data.usage.prompt_tokens || 0,
-            output: data.usage.completion_tokens || 0,
-            total: data.usage.total_tokens || 0,
-            estimated_cost_usd: 0,
-          }
-        : undefined,
-    });
+    const tokens = data.usage
+      ? (() => {
+          const rate = PRICING[KIMI_MODEL] || PRICING["kimi-k2.6"];
+          const inp = data.usage.prompt_tokens || 0;
+          const out = data.usage.completion_tokens || 0;
+          const cost = (inp / 1_000_000) * rate.input + (out / 1_000_000) * rate.output;
+          return {
+            input: inp,
+            output: out,
+            total: data.usage.total_tokens || (inp + out),
+            estimated_cost_usd: Math.round(cost * 10000) / 10000,
+          };
+        })()
+      : undefined;
+
+    return NextResponse.json({ message, tokens });
   } catch (err: unknown) {
     const error = err as Error;
     console.error("[EDITOR CHAT] Error:", error);

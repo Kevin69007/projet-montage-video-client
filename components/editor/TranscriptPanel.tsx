@@ -66,8 +66,14 @@ export default function TranscriptPanel({
                           entry.trimTo?.toString() || ""
                         );
                         if (v === null) return;
-                        const num = v.trim() === "" ? null : parseFloat(v);
-                        onTrimSilence(entry.id, num);
+                        if (v.trim() === "") {
+                          onTrimSilence(entry.id, null);
+                        } else {
+                          const num = parseFloat(v);
+                          if (Number.isFinite(num) && num >= 0) {
+                            onTrimSilence(entry.id, num);
+                          }
+                        }
                       }
                     }}
                     className={`text-[10px] font-mono px-1.5 py-0.5 transition-colors ${

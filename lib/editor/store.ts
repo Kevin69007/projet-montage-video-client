@@ -5,7 +5,7 @@
  * Used by useEditorStore() in editor components.
  */
 
-import { useCallback, useReducer } from "react";
+import { useCallback, useMemo, useReducer } from "react";
 import type {
   AppliedSubtitleStyle,
   EditorState,
@@ -250,9 +250,11 @@ export function useEditorReducer(initial: EditorState) {
     []
   );
 
-  return {
-    state,
-    actions: {
+  // Stable actions object — all callbacks are already memoized above, so actions
+  // only changes identity once (at mount). Prevents downstream effects from
+  // re-running every render.
+  const actions = useMemo(
+    () => ({
       init,
       updateStyle,
       toggleWordDeleted,
@@ -267,8 +269,26 @@ export function useEditorReducer(initial: EditorState) {
       addMarker,
       removeMarker,
       resolveMarker,
-    },
-  };
+    }),
+    [
+      init,
+      updateStyle,
+      toggleWordDeleted,
+      deleteWordRange,
+      restoreWordRange,
+      toggleLineBreak,
+      trimSilence,
+      toggleSilenceDeleted,
+      addCut,
+      removeCut,
+      toggleSegmentDeleted,
+      addMarker,
+      removeMarker,
+      resolveMarker,
+    ]
+  );
+
+  return { state, actions };
 }
 
 /**
