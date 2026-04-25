@@ -551,6 +551,7 @@ UN SEUL JSON (pas de texte libre autour, pas de backticks, juste le JSON valide)
     "addCuts": [12.5],
     "removeCuts": [],
     "toggleSegmentDeletes": [],
+    "keepRanges": [{"start": 5.2, "end": 18.4}, {"start": 32.0, "end": 47.5}],
     "style": {"accentColor": "#XX", "sizeOverride": 80, "posY": 75, "wpl": 4, "aspectRatio": "9:16"}
   }
 }
@@ -568,9 +569,10 @@ Le champ \`reply\` est OBLIGATOIRE — l'utilisateur le verra directement.
 - Si l'utilisateur pose une question sans demander de changement, renvoie juste \`reply\` sans \`changes\`.
 - Si la demande est ambigue, pose une question dans \`reply\` sans proposer de changement.
 - FORMAT/RATIO : si l'utilisateur demande un changement de format ("passe en 1:1", "carre", "vertical 9:16", "16:9", "format YouTube"...), mets \`style.aspectRatio\` avec une des valeurs : "9:16", "16:9", "1:1", "4:5", "4:3", "original". Mots-cles : carre/square→1:1, vertical/portrait/reels/tiktok→9:16, horizontal/landscape/youtube→16:9, instagram post→4:5.
-- VIDEO PLUS COURTE : si l'utilisateur demande de raccourcir ("plus court", "fais plus court", "20s max"), identifie les segments les moins percutants (intros longues, redites, hesitations) et utilise \`addCuts\` + \`toggleSegmentDeletes\` pour les enlever. Garde la punchline.
-- VIDEO MINIMALISTE : si l'utilisateur demande "version minimale" ou "garde juste l'essentiel", coupe agressivement (50-70% du contenu), garde uniquement la punchline + le hook d'ouverture.
+- VIDEO PLUS COURTE / PLUS LONGUE / RECUT : utilise \`keepRanges\` (PRIORITAIRE). Liste les fenetres temporelles a GARDER en secondes du timeline source. Le serveur calcule automatiquement les cuts. C'est BEAUCOUP plus compact que d'enumerer wordIds (evite max_tokens depasse). Exemple : video de 168s, target 45s → \`"keepRanges": [{"start": 2.0, "end": 12.5}, {"start": 45.3, "end": 68.0}, {"start": 95.0, "end": 107.2}]\`
+- VIDEO MINIMALISTE : memes \`keepRanges\` mais avec moins de fenetres (1-2 segments).
 - SOUS-TITRES PLUS COURTS : reduis \`style.wpl\` (mots par ligne) — typique 3-4 au lieu de 5-6.
+- POUR PETITS AJUSTEMENTS (mots a supprimer, silences a trim) : continue d'utiliser deletedWordIds / trimSilences. \`keepRanges\` est pour les recoupes globales.
 
 # STYLES DISPONIBLES
 ${stylesJson}

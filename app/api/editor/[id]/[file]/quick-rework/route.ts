@@ -19,7 +19,10 @@ export const maxDuration = 600;
 
 const KIMI_API_URL = "https://api.moonshot.ai/v1/chat/completions";
 const KIMI_MODEL = process.env.KIMI_MODEL || "kimi-k2.6";
-const MAX_TOKENS = 6000;
+// Bumped from 6000 → 16000 because full-mode reworks on long videos can
+// produce big patches (lots of segment IDs / kept ranges). At 6K Kimi was
+// truncating mid-JSON and we returned "Kimi reponse invalide".
+const MAX_TOKENS = 16000;
 const DEFAULT_STYLE_NAME = "hormozi";
 
 interface KimiChanges {
@@ -31,6 +34,12 @@ interface KimiChanges {
   addCuts?: number[];
   removeCuts?: number[];
   toggleSegmentDeletes?: string[];
+  /**
+   * Compact extension/cut format: time windows (in source seconds) to KEEP.
+   * Server expands these into cuts + segment-deletions. Preferred over
+   * deletedWordIds for big edits because the JSON stays small.
+   */
+  keepRanges?: Array<{ start: number; end: number }>;
   style?: {
     name?: string;
     accentColor?: string;
@@ -83,10 +92,67 @@ function extractJson(text: string): KimiOutput | null {
   }
 }
 
+/**
+ * Expand `keepRanges` (time windows to keep) into the editor primitives:
+ * - sets `cuts` at each range boundary, sorted + deduplicated
+ * - sets `deletedSegments` to the segment ids that fall OUTSIDE every kept range
+ *
+ * Operates on whatever sourceDuration the caller passes (full timeline when
+ * in fullMode). Overlapping ranges are merged. Ranges outside [0, sourceDuration]
+ * are clamped.
+ */
+function expandKeepRanges(
+  ranges: Array<{ start: number; end: number }>,
+  sourceDuration: number
+): { cuts: number[]; deletedSegments: string[] } {
+  const cleaned = ranges
+    .map((r) => ({
+      start: Math.max(0, Math.min(sourceDuration, Number(r.start))),
+      end: Math.max(0, Math.min(sourceDuration, Number(r.end))),
+    }))
+    .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.end) && r.end > r.start)
+    .sort((a, b) => a.start - b.start);
+
+  // Merge overlapping
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const r of cleaned) {
+    const last = merged[merged.length - 1];
+    if (last && r.start <= last.end + 0.001) {
+      last.end = Math.max(last.end, r.end);
+    } else {
+      merged.push({ ...r });
+    }
+  }
+
+  if (merged.length === 0) return { cuts: [], deletedSegments: [] };
+
+  // Cuts at every boundary (excluding 0 and sourceDuration which computeSegments adds)
+  const cutSet = new Set<number>();
+  for (const r of merged) {
+    if (r.start > 0 && r.start < sourceDuration) cutSet.add(r.start);
+    if (r.end > 0 && r.end < sourceDuration) cutSet.add(r.end);
+  }
+  const cuts = Array.from(cutSet).sort((a, b) => a - b);
+
+  // Compute segment ids: same algorithm as render.ts::computeSegments and
+  // store.ts::computeSegments. seg_i where i is the index in the sorted
+  // cut points, INCLUDING 0 and sourceDuration. Mark a segment deleted iff
+  // its midpoint is NOT inside any kept range.
+  const points = [0, ...cuts, sourceDuration];
+  const deletedSegments: string[] = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const mid = (points[i] + points[i + 1]) / 2;
+    const inside = merged.some((r) => mid >= r.start && mid <= r.end);
+    if (!inside) deletedSegments.push(`seg_${i}`);
+  }
+  return { cuts, deletedSegments };
+}
+
 function applyChanges(
   state: EditorState,
   changes: KimiChanges,
-  styles: Record<string, SubtitleStyle> = {}
+  styles: Record<string, SubtitleStyle> = {},
+  sourceDuration?: number
 ): EditorState {
   const next: EditorState = {
     ...state,
@@ -133,6 +199,20 @@ function applyChanges(
       else set.add(id);
     }
     next.deletedSegments = Array.from(set);
+  }
+
+  // Compact extension format: keepRanges takes precedence over manual cuts
+  // because it represents Kimi's complete intent (everything outside is cut).
+  if (
+    changes.keepRanges &&
+    Array.isArray(changes.keepRanges) &&
+    changes.keepRanges.length > 0 &&
+    typeof sourceDuration === "number" &&
+    sourceDuration > 0
+  ) {
+    const expanded = expandKeepRanges(changes.keepRanges, sourceDuration);
+    next.cuts = expanded.cuts;
+    next.deletedSegments = expanded.deletedSegments;
   }
 
   if (changes.style) {
@@ -415,12 +495,17 @@ export async function POST(
       };
       durationContext =
         `\n\n# CONTEXTE SOURCE\n` +
-        `La video source ORIGINALE fait ${originalDuration.toFixed(1)}s (${fullTranscription.length} entrees dans la transcription complete ci-dessus).\n` +
-        `La version actuelle ${rawFile} ne contient que ${currentDuration.toFixed(1)}s d'extrait. Tu peux maintenant proposer N'IMPORTE QUEL extrait du contenu original :\n` +
-        `- Si l'utilisateur veut PLUS LONG (ex. "45s", "rallonge", "+15 secondes"), utilise plus de contenu en supprimant moins de segments.\n` +
-        `- Si l'utilisateur veut PLUS COURT, supprime davantage via 'addCuts' + 'toggleSegmentDeletes'.\n` +
-        `- Si l'utilisateur ne mentionne pas de duree, garde la duree actuelle (~${Math.round(currentDuration)}s).\n` +
-        `Selectionne les meilleurs moments du contenu disponible pour atteindre l'objectif de l'utilisateur.`;
+        `Video source ORIGINALE: ${originalDuration.toFixed(1)}s (${fullTranscription.length} entrees ci-dessus).\n` +
+        `Version actuelle ${rawFile}: ${currentDuration.toFixed(1)}s d'extrait.\n` +
+        `\n# FORMAT DE REPONSE COMPACT — IMPORTANT\n` +
+        `Pour les changements de cut/duree, utilise EXCLUSIVEMENT le champ \`keepRanges\` (liste de fenetres temporelles a GARDER, en secondes du timeline original) :\n` +
+        `\`\`\`\n"changes": { "keepRanges": [ {"start": 5.2, "end": 18.4}, {"start": 95.0, "end": 130.5} ] }\n\`\`\`\n` +
+        `Le serveur calcule automatiquement les cuts et les segments a supprimer. NE LISTE PAS individuellement les wordIds ou segmentIds — c'est trop verbeux et echoue (max_tokens depasse).\n` +
+        `\n# OBJECTIF DUREE\n` +
+        `- "PLUS LONG" / "rallonge" / "+15s" / "60s" → ajoute plus de fenetres OU elargis les fenetres existantes.\n` +
+        `- "PLUS COURT" / "fais 20s" → reduis le nombre / la taille des fenetres.\n` +
+        `- Pas de duree mentionnee → garde ~${Math.round(currentDuration)}s.\n` +
+        `Selectionne les meilleurs moments (hook + punchline + transitions claires). Evite hesitations / silences > 0.4s entre fenetres en placant des coupes propres.`;
     } else {
       state = loadOrBuildState(jobDir, rawFile, styles);
       if (!state.transcription || state.transcription.length === 0) {
@@ -480,7 +565,8 @@ export async function POST(
       );
     }
 
-    const nextState = applyChanges(state, parsed.changes!, styles);
+    const renderSourceDuration = fullMode ? originalDuration : currentDuration;
+    const nextState = applyChanges(state, parsed.changes!, styles, renderSourceDuration);
 
     // Persist updated state under the RAW filename so future reworks compose on it
     const editsDir = path.join(jobDir, "edits");
