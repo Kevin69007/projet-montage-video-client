@@ -183,6 +183,7 @@ export interface QuickReworkResult {
   version: number;
   duration: number;
   sourceFile: string;
+  extensionMode?: boolean;
 }
 
 export async function quickReworkVideo(

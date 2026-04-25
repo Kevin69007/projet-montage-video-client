@@ -348,15 +348,22 @@ function reserveNextVersion(
 
 export interface RenderOptions {
   jobId: string;
-  sourceFile: string;                 // e.g. "reel_1.mp4"
+  sourceFile: string;                 // e.g. "reel_1.mp4" — used for output naming + manifest lookup
   editorState: EditorState;
   burnSubtitles: boolean;             // if true, produce a video WITH subtitles burned
   projectRoot: string;                // absolute path to the project root
   ffmpegPath: string;
+  /**
+   * Optional override for the actual video bytes to operate on. Used by
+   * extension-mode quick-rework to render against the original input
+   * (jobs/{id}/input/foo.mp4) instead of the cut output. Output naming
+   * still follows `sourceFile`.
+   */
+  sourceVideoPathOverride?: string;
 }
 
 export async function renderEditorOutput(opts: RenderOptions): Promise<RenderResult> {
-  const { jobId, sourceFile, editorState, burnSubtitles: shouldBurn, projectRoot, ffmpegPath } = opts;
+  const { jobId, sourceFile, editorState, burnSubtitles: shouldBurn, projectRoot, ffmpegPath, sourceVideoPathOverride } = opts;
 
   const jobDir = path.join(projectRoot, "jobs", jobId);
   const outputDir = path.join(jobDir, "output");
@@ -366,9 +373,9 @@ export async function renderEditorOutput(opts: RenderOptions): Promise<RenderRes
 
   fs.mkdirSync(workDir, { recursive: true });
 
-  const sourceVideoPath = path.join(outputDir, sourceFile);
+  const sourceVideoPath = sourceVideoPathOverride || path.join(outputDir, sourceFile);
   if (!fs.existsSync(sourceVideoPath)) {
-    throw new Error(`Source video not found: ${sourceFile}`);
+    throw new Error(`Source video not found: ${sourceVideoPath}`);
   }
 
   const duration = probeDuration(sourceVideoPath, ffmpegPath);

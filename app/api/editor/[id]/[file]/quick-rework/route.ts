@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import {
@@ -256,6 +257,92 @@ function loadOrBuildState(
   };
 }
 
+function probeDurationSec(videoPath: string, ffmpegPath: string): number {
+  const ffprobe = ffmpegPath.replace(/ffmpeg$/, "ffprobe");
+  for (const candidate of [ffprobe, "ffprobe"]) {
+    try {
+      const out = execSync(
+        `"${candidate}" -v error -show_entries format=duration -of default=nw=1:nk=1 "${videoPath}"`,
+        { encoding: "utf-8" }
+      ).trim();
+      const v = parseFloat(out);
+      if (v > 0) return v;
+    } catch {}
+  }
+  return 0;
+}
+
+/**
+ * Resolve the original input video for a job by reading params.json.
+ * Returns the absolute path to the first video file in `fileNames`, or null.
+ */
+function resolveOriginalInput(jobDir: string): string | null {
+  const paramsPath = path.join(jobDir, "params.json");
+  if (!fs.existsSync(paramsPath)) return null;
+  try {
+    const params = JSON.parse(fs.readFileSync(paramsPath, "utf-8"));
+    const names: unknown[] = Array.isArray(params?.fileNames) ? params.fileNames : [];
+    for (const n of names) {
+      if (typeof n === "string" && /\.(mp4|mov|avi|mkv|webm)$/i.test(n)) {
+        const p = path.join(jobDir, "input", n);
+        if (fs.existsSync(p)) return p;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Detect duration extension intent in the user prompt.
+ * Returns the requested duration in seconds if the prompt asks for MORE
+ * time than the current source provides, else null.
+ *
+ * Heuristics:
+ *  - explicit "{N}s" / "{N} secondes" — extension only when N > current + 2s
+ *  - keywords ("plus long", "rallong", "etend", "garde plus") — assumes ~50% more
+ */
+function detectExtensionIntent(prompt: string, currentDurationSec: number): number | null {
+  const lower = prompt.toLowerCase();
+  const m = lower.match(/(\d{1,3})\s*(?:s(?:ec(?:ondes?)?)?)\b/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (Number.isFinite(n) && n > currentDurationSec + 2 && n <= 600) return n;
+  }
+  if (/\b(plus long|rallong|allong|etire|etend|prolong|garde plus)/.test(lower)) {
+    return Math.min(600, Math.ceil(currentDurationSec * 1.5));
+  }
+  return null;
+}
+
+/**
+ * Get (or build + cache) the original transcription for a raw output stem.
+ * Cache lives at `output/{stem}_original_transcription.json`.
+ *
+ * Transcription is slow (~1-3 min per minute of audio). The first call pays
+ * the cost; subsequent extension reworks reuse the cache.
+ */
+function getOrBuildOriginalTranscription(
+  outputDir: string,
+  stem: string,
+  inputVideoPath: string,
+  scriptsDir: string,
+  language: string
+): TranscriptEntry[] {
+  const cachePath = path.join(outputDir, `${stem}_original_transcription.json`);
+  if (fs.existsSync(cachePath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch {}
+  }
+  const cmd = `python3 "${path.join(scriptsDir, "transcribe.py")}" --video "${inputVideoPath}" --output "${cachePath}" --language ${language}`;
+  execSync(cmd, { stdio: "pipe", maxBuffer: 50 * 1024 * 1024, timeout: 30 * 60 * 1000 });
+  if (!fs.existsSync(cachePath)) {
+    throw new Error("Transcription de l'original a echoue.");
+  }
+  return JSON.parse(fs.readFileSync(cachePath, "utf-8"));
+}
+
 /**
  * POST /api/editor/[id]/[file]/quick-rework
  * Body: { userPrompt: string }
@@ -263,6 +350,11 @@ function loadOrBuildState(
  * One-shot: ask Kimi for a JSON patch from the prompt, apply it to the
  * current EditorState, persist, render with subtitles burned, return the
  * new version info.
+ *
+ * EXTENSION MODE: when the prompt asks for a duration > current source
+ * duration, swap the EditorState to the FULL original transcription and
+ * point the renderer at the original input video, so Kimi can pick a
+ * longer cut from the unused content.
  */
 export async function POST(
   req: NextRequest,
@@ -300,18 +392,71 @@ export async function POST(
     }
 
     const styles = loadStyles(cwd);
-    const state = loadOrBuildState(jobDir, rawFile, styles);
+    const ffmpegPath = findFfmpeg();
 
-    if (!state.transcription || state.transcription.length === 0) {
-      return NextResponse.json(
-        { error: "Aucune transcription disponible pour ce fichier — impossible de retravailler." },
-        { status: 400 }
+    // Detect extension intent: does the user want MORE duration than the
+    // current cut allows? If yes and the original input is reachable, swap
+    // to full-transcription / original-source mode.
+    const currentDuration = probeDurationSec(rawSourcePath, ffmpegPath);
+    const requestedExtension = detectExtensionIntent(userPrompt, currentDuration);
+    const originalInputPath = requestedExtension !== null ? resolveOriginalInput(jobDir) : null;
+    const originalDuration = originalInputPath ? probeDurationSec(originalInputPath, ffmpegPath) : 0;
+    const extensionMode =
+      requestedExtension !== null &&
+      originalInputPath !== null &&
+      originalDuration > currentDuration + 1;
+
+    let state: EditorState;
+    let extensionContext = "";
+    if (extensionMode && originalInputPath) {
+      const scriptsDir = path.join(cwd, "pipeline", "scripts");
+      const paramsPath = path.join(jobDir, "params.json");
+      let language = "fr";
+      try {
+        const p = JSON.parse(fs.readFileSync(paramsPath, "utf-8"));
+        if (typeof p?.language === "string") language = p.language;
+      } catch {}
+      const stem = path.basename(rawFile, path.extname(rawFile));
+      const fullTranscription = getOrBuildOriginalTranscription(
+        path.join(jobDir, "output"),
+        stem,
+        originalInputPath,
+        scriptsDir,
+        language
       );
+      // Fresh state on the full timeline. Prior cuts/deletions are dropped
+      // because their timestamps were keyed to the cut-down source.
+      const priorStyle = loadOrBuildState(jobDir, rawFile, styles).style;
+      state = {
+        transcription: fullTranscription,
+        cuts: [],
+        deletedSegments: [],
+        markers: [],
+        style: priorStyle,
+        updatedAt: new Date().toISOString(),
+      };
+      extensionContext =
+        `\n\n# CONTEXTE EXTENSION\n` +
+        `La video source originale fait ${originalDuration.toFixed(1)}s ` +
+        `(la version actuelle ne fait que ${currentDuration.toFixed(1)}s). ` +
+        `Tu travailles maintenant sur la transcription COMPLETE (${fullTranscription.length} entrees). ` +
+        `L'utilisateur veut une duree d'environ ${requestedExtension}s. ` +
+        `Selectionne les meilleurs segments du contenu original pour atteindre cette duree, ` +
+        `en utilisant 'addCuts' + 'toggleSegmentDeletes' pour supprimer ce que tu ne veux pas garder. ` +
+        `Le rendu utilisera la video originale comme source.`;
+    } else {
+      state = loadOrBuildState(jobDir, rawFile, styles);
+      if (!state.transcription || state.transcription.length === 0) {
+        return NextResponse.json(
+          { error: "Aucune transcription disponible pour ce fichier — impossible de retravailler." },
+          { status: 400 }
+        );
+      }
     }
 
     const stylesJson = JSON.stringify(styles);
     const systemPrompt = buildEditorReworkSystem({ stylesJson });
-    const userMsg = buildEditorReworkUserMessage({ state, userMessage: userPrompt });
+    const userMsg = buildEditorReworkUserMessage({ state, userMessage: userPrompt + extensionContext });
 
     const res = await fetch(KIMI_API_URL, {
       method: "POST",
@@ -368,14 +513,15 @@ export async function POST(
       JSON.stringify(nextState, null, 2)
     );
 
-    // Render against the raw source with burned subtitles
+    // Render against the raw source (or the original input in extension mode)
     const result = await renderEditorOutput({
       jobId: id,
       sourceFile: rawFile,
       editorState: nextState,
       burnSubtitles: true,
       projectRoot: cwd,
-      ffmpegPath: findFfmpeg(),
+      ffmpegPath,
+      sourceVideoPathOverride: extensionMode && originalInputPath ? originalInputPath : undefined,
     });
 
     return NextResponse.json({
@@ -385,6 +531,7 @@ export async function POST(
       version: result.version,
       duration: result.duration,
       sourceFile: rawFile,
+      extensionMode,
     });
   } catch (err: unknown) {
     const error = err as Error;
