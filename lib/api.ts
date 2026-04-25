@@ -183,7 +183,8 @@ export interface QuickReworkResult {
   version: number;
   duration: number;
   sourceFile: string;
-  extensionMode?: boolean;
+  /** True when the rework was run against the original full-length input. */
+  fullMode?: boolean;
 }
 
 export async function quickReworkVideo(

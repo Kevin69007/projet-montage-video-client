@@ -293,28 +293,6 @@ function resolveOriginalInput(jobDir: string): string | null {
 }
 
 /**
- * Detect duration extension intent in the user prompt.
- * Returns the requested duration in seconds if the prompt asks for MORE
- * time than the current source provides, else null.
- *
- * Heuristics:
- *  - explicit "{N}s" / "{N} secondes" — extension only when N > current + 2s
- *  - keywords ("plus long", "rallong", "etend", "garde plus") — assumes ~50% more
- */
-function detectExtensionIntent(prompt: string, currentDurationSec: number): number | null {
-  const lower = prompt.toLowerCase();
-  const m = lower.match(/(\d{1,3})\s*(?:s(?:ec(?:ondes?)?)?)\b/);
-  if (m) {
-    const n = parseInt(m[1], 10);
-    if (Number.isFinite(n) && n > currentDurationSec + 2 && n <= 600) return n;
-  }
-  if (/\b(plus long|rallong|allong|etire|etend|prolong|garde plus)/.test(lower)) {
-    return Math.min(600, Math.ceil(currentDurationSec * 1.5));
-  }
-  return null;
-}
-
-/**
  * Get (or build + cache) the original transcription for a raw output stem.
  * Cache lives at `output/{stem}_original_transcription.json`.
  *
@@ -394,21 +372,19 @@ export async function POST(
     const styles = loadStyles(cwd);
     const ffmpegPath = findFfmpeg();
 
-    // Detect extension intent: does the user want MORE duration than the
-    // current cut allows? If yes and the original input is reachable, swap
-    // to full-transcription / original-source mode.
+    // ALWAYS use the full original transcription as Kimi's context, so it
+    // can intelligently shorten OR extend regardless of the user's wording.
+    // The cut output is no longer used as a source; we always render against
+    // the original input. Falls back to cut-only mode if the original input
+    // is missing (very old jobs without params.json).
     const currentDuration = probeDurationSec(rawSourcePath, ffmpegPath);
-    const requestedExtension = detectExtensionIntent(userPrompt, currentDuration);
-    const originalInputPath = requestedExtension !== null ? resolveOriginalInput(jobDir) : null;
+    const originalInputPath = resolveOriginalInput(jobDir);
     const originalDuration = originalInputPath ? probeDurationSec(originalInputPath, ffmpegPath) : 0;
-    const extensionMode =
-      requestedExtension !== null &&
-      originalInputPath !== null &&
-      originalDuration > currentDuration + 1;
+    const fullMode = originalInputPath !== null && originalDuration > 0;
 
     let state: EditorState;
-    let extensionContext = "";
-    if (extensionMode && originalInputPath) {
+    let durationContext = "";
+    if (fullMode && originalInputPath) {
       const scriptsDir = path.join(cwd, "pipeline", "scripts");
       const paramsPath = path.join(jobDir, "params.json");
       let language = "fr";
@@ -424,8 +400,10 @@ export async function POST(
         scriptsDir,
         language
       );
-      // Fresh state on the full timeline. Prior cuts/deletions are dropped
-      // because their timestamps were keyed to the cut-down source.
+      // Fresh state on the full timeline every rework. Prior cuts/deletions
+      // belonged to a different timeline (the cut output) and can't be
+      // mapped back; each rework starts from the full content and Kimi
+      // produces a new selection from scratch based on the user's prompt.
       const priorStyle = loadOrBuildState(jobDir, rawFile, styles).style;
       state = {
         transcription: fullTranscription,
@@ -435,15 +413,14 @@ export async function POST(
         style: priorStyle,
         updatedAt: new Date().toISOString(),
       };
-      extensionContext =
-        `\n\n# CONTEXTE EXTENSION\n` +
-        `La video source originale fait ${originalDuration.toFixed(1)}s ` +
-        `(la version actuelle ne fait que ${currentDuration.toFixed(1)}s). ` +
-        `Tu travailles maintenant sur la transcription COMPLETE (${fullTranscription.length} entrees). ` +
-        `L'utilisateur veut une duree d'environ ${requestedExtension}s. ` +
-        `Selectionne les meilleurs segments du contenu original pour atteindre cette duree, ` +
-        `en utilisant 'addCuts' + 'toggleSegmentDeletes' pour supprimer ce que tu ne veux pas garder. ` +
-        `Le rendu utilisera la video originale comme source.`;
+      durationContext =
+        `\n\n# CONTEXTE SOURCE\n` +
+        `La video source ORIGINALE fait ${originalDuration.toFixed(1)}s (${fullTranscription.length} entrees dans la transcription complete ci-dessus).\n` +
+        `La version actuelle ${rawFile} ne contient que ${currentDuration.toFixed(1)}s d'extrait. Tu peux maintenant proposer N'IMPORTE QUEL extrait du contenu original :\n` +
+        `- Si l'utilisateur veut PLUS LONG (ex. "45s", "rallonge", "+15 secondes"), utilise plus de contenu en supprimant moins de segments.\n` +
+        `- Si l'utilisateur veut PLUS COURT, supprime davantage via 'addCuts' + 'toggleSegmentDeletes'.\n` +
+        `- Si l'utilisateur ne mentionne pas de duree, garde la duree actuelle (~${Math.round(currentDuration)}s).\n` +
+        `Selectionne les meilleurs moments du contenu disponible pour atteindre l'objectif de l'utilisateur.`;
     } else {
       state = loadOrBuildState(jobDir, rawFile, styles);
       if (!state.transcription || state.transcription.length === 0) {
@@ -456,7 +433,7 @@ export async function POST(
 
     const stylesJson = JSON.stringify(styles);
     const systemPrompt = buildEditorReworkSystem({ stylesJson });
-    const userMsg = buildEditorReworkUserMessage({ state, userMessage: userPrompt + extensionContext });
+    const userMsg = buildEditorReworkUserMessage({ state, userMessage: userPrompt + durationContext });
 
     const res = await fetch(KIMI_API_URL, {
       method: "POST",
@@ -513,7 +490,7 @@ export async function POST(
       JSON.stringify(nextState, null, 2)
     );
 
-    // Render against the raw source (or the original input in extension mode)
+    // Render against the original input in fullMode (default), else the cut.
     const result = await renderEditorOutput({
       jobId: id,
       sourceFile: rawFile,
@@ -521,7 +498,7 @@ export async function POST(
       burnSubtitles: true,
       projectRoot: cwd,
       ffmpegPath,
-      sourceVideoPathOverride: extensionMode && originalInputPath ? originalInputPath : undefined,
+      sourceVideoPathOverride: fullMode && originalInputPath ? originalInputPath : undefined,
     });
 
     return NextResponse.json({
@@ -531,7 +508,7 @@ export async function POST(
       version: result.version,
       duration: result.duration,
       sourceFile: rawFile,
-      extensionMode,
+      fullMode,
     });
   } catch (err: unknown) {
     const error = err as Error;

@@ -83,10 +83,6 @@ function OutputCard({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // If the user mentions a duration in seconds, the endpoint may switch to
-  // extension mode (re-transcribes the original input — slow on first call).
-  const extensionLikely = /\b(\d{1,3})\s*(?:s(?:ec(?:ondes?)?)?)\b|\b(plus long|rallong|allong|etire|etend|prolong|garde plus)\b/i.test(prompt);
-
   const submitRework = async () => {
     const trimmed = prompt.trim();
     if (!trimmed || pending) return;
@@ -197,9 +193,7 @@ function OutputCard({
                 label={
                   phase === "rendering"
                     ? "Rendu en cours — concat ffmpeg + sous-titres burned..."
-                    : extensionLikely
-                      ? "Mode extension — transcription complete + Kimi (peut prendre 2-5 min)..."
-                      : "Kimi analyse ta demande et planifie les modifications..."
+                    : "Kimi analyse la transcription complete (peut prendre 2-5 min au premier rework)..."
                 }
               />
             </div>
@@ -221,7 +215,7 @@ function OutputCard({
               />
               <div className="flex items-center justify-between mt-2">
                 <span className="mono-label text-text-muted/60">
-                  {extensionLikely ? "Mode extension actif (transcription complete)" : "Cmd/Ctrl + Entree"}
+                  Kimi voit la video originale complete · Cmd/Ctrl + Entree
                 </span>
                 <button
                   onClick={submitRework}
